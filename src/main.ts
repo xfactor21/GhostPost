@@ -109,17 +109,7 @@ let coachVisible = false;
 let batchPost: Post | null = null;
 let batchSourceId = "";
 let expandedCampaigns = new Set<string>();
-function postTime(post:Post){return Date.parse(post.dueAt||post.sentAt||post.createdAt)||0;}
-function fingerprint(post:Post) {
- return post.text.toLowerCase().replace(/https?:\/\/\S+/g," ").replace(/#[\w]+/g," ").replace(/[^a-z0-9\s]/g," ").replace(/\s+/g," ").trim();
-}
-function similarity(a:Post,b:Post) {
- const aa=new Set(fingerprint(a).split(" ").filter(w=>w.length>2));
- const bb=new Set(fingerprint(b).split(" ").filter(w=>w.length>2));
- if(!aa.size||!bb.size)return 0;
- let common=0;for(const w of aa)if(bb.has(w))common++;
- return 2*common/(aa.size+bb.size);
-}
+function postTime(post:Post){return Date.parse(post.sentAt||post.dueAt||post.createdAt)||0;}
 function campaignMinute(post:Post) {
  // Prefer actual sentAt; scheduled items have dueAt. Never group solely by creation time.
  const timestamp=post.sentAt||post.dueAt;
@@ -459,7 +449,8 @@ function composerView() {
 }
 function historyView() {
   const posts = filtered(history);
-  return `<div class="view-title"><div class="section-label">A RECORD OF THE WORK</div><h1>Publishing history<span class="pink">.</span></h1><p>API-reported Buffer activity and your own manual completion records.</p></div>${filters()}<div class="actions">${button("Refresh history", "sync-history", busy || !linked ? "disabled" : "", "subtle")}</div>${posts.length ? posts.map(postCard).join("") : noData("No Buffer history loaded", historyLoaded ? "No records match your current filters." : "Refresh history to retrieve published and failed posts.")}${historyCursor ? button("Load more history", "more-history", busy ? "disabled" : "", "subtle wide") : ""}<div class="section-row"><h2>Manual posting log</h2><small>User-reported, never API-verified</small></div>${
+  const groups=campaignGroups(posts);
+  return `<div class="view-title"><div class="section-label">A RECORD OF THE WORK</div><h1>Publishing history<span class="pink">.</span></h1><p>API-reported Buffer activity and your own manual completion records.</p></div>${filters()}<div class="actions">${button("Refresh history", "sync-history", busy || !linked ? "disabled" : "", "subtle")}</div>${posts.length ? groups.map(campaignCard).join("") : noData("No Buffer history loaded", historyLoaded ? "No records match your current filters." : "Refresh history to retrieve published and failed posts.")}${historyCursor ? button("Load more history", "more-history", busy ? "disabled" : "", "subtle wide") : ""}<div class="section-row"><h2>Manual posting log</h2><small>User-reported, never API-verified</small></div>${
     active(ws.tasks)
       .filter(
         (task) =>
@@ -792,7 +783,7 @@ app.addEventListener("click", (event) => {
   if (action === "coach-open") { showCoach(true); render(); return; }
   if (action === "next-buffer") { const next = nextCampaignPost(); if(next)startBatch(next); else toast("Refresh your Buffer queue first."); return; }
   if (action === "campaign-select" || action === "campaign-next" || action === "campaign-prev") {
-    const group=campaignGroups(queue).find(g=>g.length>1&&g[0].id===id);
+    const group=campaignGroups([...queue,...history]).find(g=>g.length>1&&g[0].id===id);
     if(!group||!id)return;
     if(action==="campaign-select") {
       const version=target.dataset.version;
