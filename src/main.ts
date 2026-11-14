@@ -120,27 +120,70 @@ function similarity(a:Post,b:Post) {
  let common=0;for(const w of aa)if(bb.has(w))common++;
  return 2*common/(aa.size+bb.size);
 }
-function likelySameCampaign(a:Post,b:Post) {
- if(a.channelId===b.channelId||a.id===b.id)return false;
- const delta=Math.abs(postTime(a)-postTime(b));
- if(delta>48*3600*1000)return false;
- const af=fingerprint(a),bf=fingerprint(b);
- return af.length>=24&&bf.length>=24&&(af===bf||similarity(a,b)>=0.78);
+function campaignMinute(post:Post) {
+ // Prefer actual sentAt; scheduled items have dueAt. Never group solely by creation time.
+ const timestamp=post.sentAt||post.dueAt;
+ const ms=timestamp?Date.parse(timestamp):NaN;
+ return Number.isFinite(ms)?Math.floor(ms/60000):null;
 }
 function campaignGroups(posts:Post[]) {
- const groups:Post[][]=[];
- for(const post of [...posts].sort((a,b)=>postTime(a)-postTime(b))) {
-  const match=groups.find(group=>group.some(other=>likelySameCampaign(other,post)));
-  if(match)match.push(post);else groups.push([post]);
+ const byMinute=new Map<number,Post[]>();
+ const singles:Post[][]=[];
+ for(const post of posts) {
+  const minute=campaignMinute(post);
+  if(minute===null){singles.push([post]);continue;}
+  const bucket=byMinute.get(minute)||[];
+  bucket.push(post);
+  byMinute.set(minute,bucket);
  }
- return groups;
+ const groups:Post[][]=[...singles];
+ for(const bucket of byMinute.values()){
+  // Same minute and distinct channels is the strong campaign signal.
+  // Avoid merging two posts from the same channel into one group.
+  const pending=[...bucket];
+  while(pending.length){
+   const channelsSeen=new Set<string>();
+   const group:Post[]=[];
+   for(let i=0;i<pending.length;){
+    const p=pending[i];
+    if(!channelsSeen.has(p.channelId)){
+     channelsSeen.add(p.channelId);group.push(p);pending.splice(i,1);
+    }else i++;
+   }
+   groups.push(group);
+  }
+ }
+ return groups.sort((a,b)=>postTime(a[0])-postTime(b[0]));
+}
+const selectedCampaignVersion=new Map<string,string>();
+function mediaPreview(post:Post){
+ const assets=post.assets||[];
+ if(!assets.length)return `<div class="campaign-media-empty"><span>✧</span><small>No media returned for this version</small></div>`;
+ return `<div class="campaign-media" aria-label="${assets.length} media attachments">${assets.slice(0,5).map((asset,index)=>{
+  const mime=asset.mimeType||"Media";
+  // Buffer currently returns asset IDs and MIME types, not usable image URLs.
+  // Never fabricate thumbnails or expose media URLs without verification.
+  const label=mime.startsWith("video/")?"▶":mime.startsWith("image/")?"▧":"◇";
+  return `<span class="media-tile" title="${escape(mime)}" aria-label="${escape(mime)} attachment ${index+1}">${label}<small>${escape(mime.split("/")[1]||"media")}</small></span>`;
+ }).join("")}${assets.length>5?`<span class="media-more">+${assets.length-5}</span>`:""}</div>`;
 }
 function campaignCard(group:Post[]) {
- const lead=group[0];
- if(group.length===1)return postCard(lead);
- const open=expandedCampaigns.has(lead.id);
- const platforms=[...new Set(group.map(p=>channels.find(c=>c.id===p.channelId)?.service||p.channelId))];
- return `<article class="post-card campaign-card"><div class="section-row"><div><span class="section-label">✕ POSSIBLE BUFFER CAMPAIGN</span><h3>${group.length} channel versions · 1 manual workflow</h3></div>${badge(platforms.join(" · "))}</div><p class="post-text">${escape(lead.text.slice(0,300))}</p><p class="hint">Grouped by similar text across different channels within 48 hours. Review before using; Buffer does not supply a confirmed campaign ID.</p><div class="actions">${button("Prepare once for all destinations","batch-post",`data-id="${escape(lead.id)}"`,"primary")}${button(open?"Hide source versions":"Review "+group.length+" versions","campaign-toggle",`data-id="${escape(lead.id)}"`,"subtle")}</div>${open?group.map(postCard).join(""):""}</article>`;
+ if(group.length===1)return postCard(group[0]);
+ const key=group[0].id;
+ const chosen=group.find(p=>p.id===selectedCampaignVersion.get(key))||group[0];
+ const index=group.findIndex(p=>p.id===chosen.id);
+ const channel=channels.find(c=>c.id===chosen.channelId);
+ const minute=campaignMinute(chosen);
+ const time=minute===null?"":new Date(minute*60000).toLocaleString([],{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
+ return `<article class="post-card campaign-card" aria-label="Grouped Buffer campaign with ${group.length} channel versions">
+ <div class="campaign-head"><span class="campaign-ghost">${ghost}</span><div><span class="section-label">✕ CAMPAIGN RADAR</span><h3>One moment. ${group.length} voices.</h3><small>${escape(time)} · matching Buffer publish minute</small></div><span class="campaign-count">${group.length}×</span></div>
+ <div class="campaign-tabs" role="group" aria-label="Choose the source platform version">${group.map((p,i)=>{
+  const c=channels.find(x=>x.id===p.channelId);
+  return button(`${escape(c?.service||"Channel")} <small>${escape(c?.name||"")}</small>`,"campaign-select",`data-id="${escape(key)}" data-version="${escape(p.id)}" aria-pressed="${p.id===chosen.id}" title="Show ${escape(c?.name||c?.service||"channel")} version"`,p.id===chosen.id?"campaign-tab active":"campaign-tab");
+ }).join("")}</div>
+ <div class="campaign-copy" aria-live="polite"><div class="campaign-copy-head"><strong>${escape(channel?.name||channel?.service||"Buffer version")}</strong><span>${index+1} / ${group.length}</span></div><p class="post-text">${escape(chosen.text||"Media-only post")}</p>${mediaPreview(chosen)}</div>
+ <div class="campaign-actions"><span class="hint">Select a platform to inspect its exact copy and media metadata. Equal publish minutes are a strong grouping signal, not an API-confirmed campaign ID.</span><div class="actions">${button("← Previous","campaign-prev",`data-id="${escape(key)}"`,"subtle")}${button("Next version →","campaign-next",`data-id="${escape(key)}"`,"subtle")}${button("✕ Prepare this version","batch-post",`data-id="${escape(chosen.id)}"`,"primary")}</div></div>
+ </article>`;
 }
 function nextCampaignPost(){
  const groups=campaignGroups(queue.filter(p=>p.text.trim()));
@@ -382,7 +425,7 @@ function todayView() {
 function queueView() {
   const posts = filtered(queue);
   const groups=campaignGroups(posts);
-  return `<div class="view-title"><div class="section-label">KNOW WHAT’S COMING</div><h1>Your queue<span class="pink">.</span></h1><p>Scheduled, in-flight, approval and draft records from Buffer. Similar channel versions are grouped as possible campaigns, not confirmed matches.</p></div>${filters()}<div class="actions">${button(busy ? "Refreshing…" : "Refresh queue", "sync-queue", busy || !linked ? "disabled" : "", "subtle")}</div>${posts.length ? groups.map(campaignCard).join("") : noData("No queue records to show", queueLoaded ? "Nothing matches these filters in the loaded pages." : "Connect Buffer and refresh the queue to load available posts.")}${queueCursor ? button("Load more queue records", "more-queue", busy ? "disabled" : "", "subtle wide") : ""}`;
+  return `<div class="view-title"><div class="section-label">KNOW WHAT’S COMING</div><h1>Your queue<span class="pink">.</span></h1><p>Scheduled, in-flight, approval and draft records from Buffer. Posts sharing the exact publish minute across different channels appear together. Select a channel tab to switch versions.</p></div>${filters()}<div class="actions">${button(busy ? "Refreshing…" : "Refresh queue", "sync-queue", busy || !linked ? "disabled" : "", "subtle")}</div>${posts.length ? groups.map(campaignCard).join("") : noData("No queue records to show", queueLoaded ? "Nothing matches these filters in the loaded pages." : "Connect Buffer and refresh the queue to load available posts.")}${queueCursor ? button("Load more queue records", "more-queue", busy ? "disabled" : "", "subtle wide") : ""}`;
 }
 function field(
   label: string,
@@ -748,7 +791,20 @@ app.addEventListener("click", (event) => {
   if (action === "coach-dismiss") { localStorage.setItem(coachKey(),"seen"); coachVisible=false; render(); return; }
   if (action === "coach-open") { showCoach(true); render(); return; }
   if (action === "next-buffer") { const next = nextCampaignPost(); if(next)startBatch(next); else toast("Refresh your Buffer queue first."); return; }
-  if (action === "campaign-toggle") { if(id){if(expandedCampaigns.has(id))expandedCampaigns.delete(id);else expandedCampaigns.add(id);} render(); return; }
+  if (action === "campaign-select" || action === "campaign-next" || action === "campaign-prev") {
+    const group=campaignGroups(queue).find(g=>g.length>1&&g[0].id===id);
+    if(!group||!id)return;
+    if(action==="campaign-select") {
+      const version=target.dataset.version;
+      if(group.some(p=>p.id===version))selectedCampaignVersion.set(id,version!);
+    } else {
+      const current=group.findIndex(p=>p.id===selectedCampaignVersion.get(id));
+      const position=current<0?0:current;
+      selectedCampaignVersion.set(id,group[(position+(action==="campaign-next"?1:-1)+group.length)%group.length].id);
+    }
+    render();
+    return;
+  }
   if (action === "batch-post" && post) { startBatch(post); return; }
   if (action === "batch-close") { batchPost=null; render(); return; }
   if (action === "batch-settings") { batchPost=null; navigate("settings"); return; }
