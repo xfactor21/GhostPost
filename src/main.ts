@@ -105,6 +105,21 @@ let destinationEditor: Item = {
 };
 let prepare: Item | null = null;
 let toastTimer: ReturnType<typeof setTimeout>;
+let coachVisible = false;
+const guide: Record<View, { title:string; detail:string; steps:string[] }> = {
+ today:{title:"Welcome to Mission Control",detail:"Your private bridge from Buffer to the places you publish by hand.",steps:["Connect Buffer and refresh your channels.","Use Next post to prepare manual cross-posts.","Track what you published yourself."]},
+ queue:{title:"On the radar",detail:"These are real records returned by Buffer, not simulated publishing.",steps:["Refresh your scheduled queue.","Filter by date or channel.","Prepare any post for a manual destination."]},
+ composer:{title:"Create in your own space",detail:"GhostPost drafts stay private and separate from Buffer.",steps:["Write and save a draft.","Adapt the draft for a destination.","Copy and publish manually."]},
+ history:{title:"Every signal has a story",detail:"Buffer activity and your manual completion reports are clearly separated.",steps:["Refresh published history.","Review manual tasks.","Mark completion only after publishing yourself."]},
+ settings:{title:"Connect your orbit",detail:"Configure Buffer and your favorite manual destinations.",steps:["Connect your own Buffer account.","Add HTTPS posting URLs for each destination.","Review exports, privacy and connection health."]}
+};
+function coachKey(){return "ghostpost-tour-v1:"+(user?.userId||"guest")+":"+view;}
+function showCoach(force=false){coachVisible=force||localStorage.getItem(coachKey())!=="seen";}
+function coachPanel(){
+ if(!coachVisible||prepare)return "";
+ const g=guide[view];
+ return `<section class="coach-card" role="dialog" aria-modal="false" aria-label="Page guide"><div class="coach-top"><span class="section-label">✦ FIRST LOOK · GHOSTPOST GUIDE</span>${button("✕","coach-dismiss",'aria-label="Dismiss guide"',"text-button")}</div><h2>${escape(g.title)}</h2><p>${escape(g.detail)}</p><ol>${g.steps.map(x=>`<li>${escape(x)}</li>`).join("")}</ol><div class="actions">${button("Got it ✓","coach-dismiss","","primary")}</div></section>`;
+}
 const escape = (value: unknown) =>
   String(value ?? "").replace(
     /[&<>"']/g,
@@ -256,7 +271,7 @@ function todayView() {
   const drafts = active(ws.drafts).sort(
     (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0),
   );
-  return `<section class="hero panel"><div><span class="section-label">YOUR PUBLISHING WORKSPACE</span><h1>Your next post,<br><em>without the clutter.</em></h1><p>Write a draft, check your schedule, and keep track of what’s next.</p><div class="actions">${button("＋ Write a draft", "new", "", "primary")}${linked ? button("View scheduled posts", "queue", "", "subtle") : button(configured ? "Connect Buffer" : "Set up Buffer", configured ? "connect" : "settings", "", "subtle")}</div></div><div class="hero-ghost" aria-hidden="true">${ghost}</div></section>
+  return `<section class="hero panel"><div><span class="section-label">MISSION CONTROL · PLANET.X</span><h1>Your next post,<br><em>without the clutter.</em></h1><p>Connect Buffer, adapt your next post for manual destinations, and track the human last mile.</p><div class="actions">${button("✕ Next Buffer post", "next-buffer", !linked || !queue.length ? "disabled" : "", "primary")}${button("＋ Write a draft", "new", "", "subtle")}${linked ? button("View scheduled posts", "queue", "", "subtle") : button(configured ? "Connect Buffer" : "Set up Buffer", configured ? "connect" : "settings", "", "subtle")}</div></div><div class="hero-ghost" aria-hidden="true">${ghost}</div></section>
   <section class="connection-strip panel" aria-label="Buffer connection"><div><strong>${linked ? (reconnect ? "Buffer needs reconnecting" : "Buffer connected") : configured ? "Connect your Buffer account" : "Buffer setup needs finishing"}</strong><p>${linked ? (lastSync ? "Updated " + escape(date(lastSync)) : "Refresh to load your channels and posts.") : configured ? "Bring your channels, scheduled posts, and history into GhostPost." : "The new deployment needs its Buffer app credentials. You can still work on your drafts."}</p></div>${button(linked ? (reconnect ? "Reconnect" : "Refresh") : configured ? "Connect Buffer" : "View setup", linked ? (reconnect ? "connect" : "sync") : configured ? "connect" : "settings", busy ? "disabled" : "", "subtle")}</section>
   <div class="home-grid"><section><div class="section-row"><h2>Recent drafts</h2>${button("All drafts", "drafts", "", "text-button")}</div>${
     drafts
@@ -383,7 +398,7 @@ function render() {
   const focus = document.activeElement as HTMLInputElement | null;
   const focusId = focus?.id;
   const selection = focus?.selectionStart;
-  app.innerHTML = `<header class="topbar"><a href="#today" class="wordmark"><span class="brand-ghost">${ghost}</span><span>Ghost<span class="pink">Post</span><small>by planet.X <b>✕</b> <i>v0.3.1 · alpha</i></small></span></a><nav aria-label="Workspace">${navigation()}</nav><div class="account">${badge(linked ? "Buffer connected" : configured ? "Buffer not connected" : "Buffer setup needed", linked ? "good" : "")}${button(user ? user.name?.split(" ")[0] || "Account" : "Sign in", user ? "account" : "signin", busy ? "disabled" : "", "subtle")}</div></header>${!user ? `<div class="signin-banner"><span><strong>Your publishing flow starts here.</strong> Sign in for private drafts, destinations and Buffer activity.</span>${button("Sign in to GhostPost", "signin", busy ? "disabled" : "", "primary")}</div>` : ""}${message ? `<div class="alert" role="alert"><span>${escape(message)}</span>${button("Dismiss", "dismiss", "", "text-button")}</div>` : ""}${!navigator.onLine ? '<div class="alert">You’re offline. Keep this page open to preserve unsaved text. Saving and Buffer sync need a connection.</div>' : ""}<div class="workspace">${timeline()}<main id="main" tabindex="-1">${{ today: todayView, queue: queueView, composer: composerView, history: historyView, settings: settingsView }[view]()}</main>${insightsPanel()}</div>${dock()}${preparePanel()}`;
+  app.innerHTML = `<header class="topbar"><a href="#today" class="wordmark"><span class="brand-ghost">${ghost}</span><span>Ghost<span class="pink">Post</span><small>by planet.X <b>✕</b> <i>v0.3.1 · alpha</i></small></span></a><nav aria-label="Workspace">${navigation()}</nav><div class="account">${badge(linked ? "Buffer connected" : configured ? "Buffer not connected" : "Buffer setup needed", linked ? "good" : "")}${button(user ? user.name?.split(" ")[0] || "Account" : "Sign in", user ? "account" : "signin", busy ? "disabled" : "", "subtle")}</div></header>${!user ? `<div class="signin-banner"><span><strong>Your publishing flow starts here.</strong> Sign in for private drafts, destinations and Buffer activity.</span>${button("Sign in to GhostPost", "signin", busy ? "disabled" : "", "primary")}</div>` : ""}${message ? `<div class="alert" role="alert"><span>${escape(message)}</span>${button("Dismiss", "dismiss", "", "text-button")}</div>` : ""}${!navigator.onLine ? '<div class="alert">You’re offline. Keep this page open to preserve unsaved text. Saving and Buffer sync need a connection.</div>' : ""}<div class="workspace">${timeline()}<main id="main" tabindex="-1">${{ today: todayView, queue: queueView, composer: composerView, history: historyView, settings: settingsView }[view]()}</main>${insightsPanel()}</div>${dock()}${preparePanel()}${coachPanel()}`;
   if (
     focusId &&
     [
@@ -509,6 +524,7 @@ function navigate(next: View) {
   }
   location.hash = next;
   view = next;
+  showCoach();
   render();
 }
 async function copy(value = "") {
@@ -643,6 +659,7 @@ app.addEventListener("click", (event) => {
   const id = target.dataset.id;
   const kind = target.dataset.kind as "drafts" | "destinations" | "tasks";
   const post = [...queue, ...history].find((item) => item.id === id);
+  if (action === "coach-dismiss") { localStorage.setItem(coachKey(),"seen"); coachVisible=false; render(); return; }
   if (action === "coach-open") { showCoach(true); render(); return; }
   if (action === "next-buffer") { const next = [...queue].filter(p=>p.text.trim()).sort((a,b)=>Date.parse(a.dueAt||a.createdAt)-Date.parse(b.dueAt||b.createdAt))[0]; if(next)openPrepare({id:"",text:next.text},"buffer:"+next.id); else toast("Refresh your Buffer queue first."); return; }
   if (action === "dismiss") {
@@ -971,6 +988,7 @@ window.addEventListener("hashchange", () => {
       statusFilter = "";
     }
     view = next;
+    showCoach();
   }
   render();
 });
@@ -1047,6 +1065,7 @@ async function init() {
     ? (location.hash.slice(1) as View)
     : "today";
   booting = false;
+  showCoach();
   render();
   if (user && linked && !reconnect) await run(refreshBuffer);
 }
