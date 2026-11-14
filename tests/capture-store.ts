@@ -1,0 +1,11 @@
+import {createStore} from '../backend/store';
+const queries:{sql:string,values:unknown[]}[]=[];
+const db=createStore(async(sql,values)=>{queries.push({sql,values});return {rows:[{id:'migration_probe'}]};});
+await db.tx.add('migration_probe',[{id:'migration_probe',ownerId:'alice',revision:0,nullable:null,remove:'old'}]);
+await db.tx.update('migration_probe',[{id:'migration_probe',record:{revision:1},if:{ownerId:'bob',revision:0}}],{patch:true});
+await db.tx.update('migration_probe',[{id:'migration_probe',record:{revision:1},if:{ownerId:'alice',revision:0}}],{patch:true});
+await db.tx.update('migration_probe',[{id:'migration_probe',record:{remove:undefined,hello:'world'},if:{nullable:null,missing:undefined}}],{patch:true});
+await db.tx.update('migration_probe',[{id:'migration_probe',record:{ownerId:'alice',revision:2},if:{revision:1}}]);
+await db.tx.update('migration_probe',[{id:'migration_upsert',record:{value:1}}]);
+await db.tx.update('migration_probe',[{id:'migration_upsert',record:{value:2,missing:undefined}}],{patch:true});
+console.log(JSON.stringify(queries));
