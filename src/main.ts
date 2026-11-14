@@ -106,6 +106,29 @@ let destinationEditor: Item = {
 let prepare: Item | null = null;
 let toastTimer: ReturnType<typeof setTimeout>;
 let coachVisible = false;
+let batchPost: Post | null = null;
+let batchSelected: string[] = [];
+let batchText: Record<string,string> = {};
+function variantFor(source:string,destination:Item) {
+ const platform=(destination.platform||"").toLowerCase();
+ const clean=source.trim();
+ if(platform.includes("reddit"))return clean.replace(/#[a-zA-Z0-9_]+/g,"").replace(/\n{3,}/g,"\n\n").trim();
+ if(platform.includes("bluesky")||platform.includes("threads"))return clean.length>280?clean.slice(0,277).trimEnd()+"…":clean;
+ return clean;
+}
+function startBatch(post:Post) {
+ batchPost=post;
+ const dest=active(ws.destinations).filter(d=>d.active!==false&&url(d.url));
+ batchSelected=dest.map(d=>d.id);
+ batchText=Object.fromEntries(dest.map(d=>[d.id,variantFor(post.text,d)]));
+ coachVisible=false;
+ render();
+}
+function batchPanel(){
+ if(!batchPost)return "";
+ const dest=active(ws.destinations).filter(d=>d.active!==false&&url(d.url));
+ return `<dialog id="batch-dialog" aria-labelledby="batch-title"><div class="section-row"><div><span class="section-label">✕ SPECTRAL WORKFLOW</span><h2 id="batch-title">One post. Many destinations.</h2></div>${button("Close","batch-close",'aria-label="Close batch workflow"',"subtle")}</div><p class="hint">Real Buffer source. Editable, rule-based platform variants—not AI-generated content. GhostPost never publishes for you.</p><div class="batch-source"><small>BUFFER SOURCE · ${escape(batchPost.status)}</small><p>${escape(batchPost.text.slice(0,450))}</p></div>${dest.length?dest.map(d=>`<div class="batch-destination"><label class="check"><input type="checkbox" data-batch-select="${escape(d.id)}" ${batchSelected.includes(d.id)?"checked":""}><strong>${escape(d.name)}</strong>${badge(d.platform||"Custom")}</label><textarea data-batch-copy="${escape(d.id)}" aria-label="Adapted copy for ${escape(d.name)}" rows="4" maxlength="10000">${escape(batchText[d.id]||"")}</textarea><small>${escape(d.instructions||"Check this destination's current posting rules.")}</small><div class="actions">${button("Copy caption","batch-copy",`data-id="${escape(d.id)}"`,"subtle")}${button("Open posting page ↗","batch-open",`data-id="${escape(d.id)}"`,"subtle")}</div></div>`).join(""):`<div class="empty"><h3>No destinations yet</h3><p>Add your Reddit community, personal profile, or custom posting URL in Settings.</p>${button("Add destination","batch-settings","","primary")}</div>`}<div class="actions">${button("Open selected pages ↗","batch-open-all",!dest.length?"disabled":"","subtle")}${button("Save selected manual tasks","batch-save",!dest.length||busy?"disabled":"","primary")}</div><p class="hint">Your browser may block multiple tabs. Pages open in the current browser; GhostPost cannot select other installed browsers. Review, publish manually, then record completion.</p></dialog>`;
+}
 const guide: Record<View, { title:string; detail:string; steps:string[] }> = {
  today:{title:"Welcome to Mission Control",detail:"Your private bridge from Buffer to the places you publish by hand.",steps:["Connect Buffer and refresh your channels.","Use Next post to prepare manual cross-posts.","Track what you published yourself."]},
  queue:{title:"On the radar",detail:"These are real records returned by Buffer, not simulated publishing.",steps:["Refresh your scheduled queue.","Filter by date or channel.","Prepare any post for a manual destination."]},
@@ -398,7 +421,7 @@ function render() {
   const focus = document.activeElement as HTMLInputElement | null;
   const focusId = focus?.id;
   const selection = focus?.selectionStart;
-  app.innerHTML = `<header class="topbar"><a href="#today" class="wordmark"><span class="brand-ghost">${ghost}</span><span>Ghost<span class="pink">Post</span><small>by planet.X <b>✕</b> <i>v0.3.1 · alpha</i></small></span></a><nav aria-label="Workspace">${navigation()}</nav><div class="account">${badge(linked ? "Buffer connected" : configured ? "Buffer not connected" : "Buffer setup needed", linked ? "good" : "")}${button(user ? user.name?.split(" ")[0] || "Account" : "Sign in", user ? "account" : "signin", busy ? "disabled" : "", "subtle")}</div></header>${!user ? `<div class="signin-banner"><span><strong>Your publishing flow starts here.</strong> Sign in for private drafts, destinations and Buffer activity.</span>${button("Sign in to GhostPost", "signin", busy ? "disabled" : "", "primary")}</div>` : ""}${message ? `<div class="alert" role="alert"><span>${escape(message)}</span>${button("Dismiss", "dismiss", "", "text-button")}</div>` : ""}${!navigator.onLine ? '<div class="alert">You’re offline. Keep this page open to preserve unsaved text. Saving and Buffer sync need a connection.</div>' : ""}<div class="workspace">${timeline()}<main id="main" tabindex="-1">${{ today: todayView, queue: queueView, composer: composerView, history: historyView, settings: settingsView }[view]()}</main>${insightsPanel()}</div>${dock()}${preparePanel()}${coachPanel()}`;
+  app.innerHTML = `<header class="topbar"><a href="#today" class="wordmark"><span class="brand-ghost">${ghost}</span><span>Ghost<span class="pink">Post</span><small>by planet.X <b>✕</b> <i>v0.3.1 · alpha</i></small></span></a><nav aria-label="Workspace">${navigation()}</nav><div class="account">${badge(linked ? "Buffer connected" : configured ? "Buffer not connected" : "Buffer setup needed", linked ? "good" : "")}${button(user ? user.name?.split(" ")[0] || "Account" : "Sign in", user ? "account" : "signin", busy ? "disabled" : "", "subtle")}</div></header>${!user ? `<div class="signin-banner"><span><strong>Your publishing flow starts here.</strong> Sign in for private drafts, destinations and Buffer activity.</span>${button("Sign in to GhostPost", "signin", busy ? "disabled" : "", "primary")}</div>` : ""}${message ? `<div class="alert" role="alert"><span>${escape(message)}</span>${button("Dismiss", "dismiss", "", "text-button")}</div>` : ""}${!navigator.onLine ? '<div class="alert">You’re offline. Keep this page open to preserve unsaved text. Saving and Buffer sync need a connection.</div>' : ""}<div class="workspace">${timeline()}<main id="main" tabindex="-1">${{ today: todayView, queue: queueView, composer: composerView, history: historyView, settings: settingsView }[view]()}</main>${insightsPanel()}</div>${dock()}${preparePanel()}${batchPanel()}${coachPanel()}`;
   if (
     focusId &&
     [
@@ -419,7 +442,7 @@ function render() {
     )
       target.setSelectionRange(selection, selection);
   }
-  const dialog = document.querySelector<HTMLDialogElement>("#manual-dialog");
+  const dialog = document.querySelector<HTMLDialogElement>("#manual-dialog") || document.querySelector<HTMLDialogElement>("#batch-dialog");
   if (dialog && !dialog.matches(":modal")) {
     dialog.close();
     dialog.showModal();
@@ -578,6 +601,7 @@ app.addEventListener("input", (event) => {
       ...destinationEditor,
       [target.name]: target.type === "checkbox" ? target.checked : target.value,
     };
+  if (target.dataset.batchCopy) batchText[target.dataset.batchCopy]=target.value;
   if (form === "manual-form" && prepare && target.name !== "confirmed") {
     prepare = { ...prepare, [target.name]: target.value };
     const count = document.getElementById("manual-count");
@@ -590,6 +614,7 @@ app.addEventListener("input", (event) => {
 });
 app.addEventListener("change", (event) => {
   const target = event.target as HTMLInputElement;
+  if (target.dataset.batchSelect) batchSelected=target.checked?[...new Set([...batchSelected,target.dataset.batchSelect])]:batchSelected.filter(x=>x!==target.dataset.batchSelect);
   if (target.id === "channel-filter") {
     channelFilter = target.value;
     render();
@@ -661,7 +686,30 @@ app.addEventListener("click", (event) => {
   const post = [...queue, ...history].find((item) => item.id === id);
   if (action === "coach-dismiss") { localStorage.setItem(coachKey(),"seen"); coachVisible=false; render(); return; }
   if (action === "coach-open") { showCoach(true); render(); return; }
-  if (action === "next-buffer") { const next = [...queue].filter(p=>p.text.trim()).sort((a,b)=>Date.parse(a.dueAt||a.createdAt)-Date.parse(b.dueAt||b.createdAt))[0]; if(next)openPrepare({id:"",text:next.text},"buffer:"+next.id); else toast("Refresh your Buffer queue first."); return; }
+  if (action === "next-buffer") { const next = [...queue].filter(p=>p.text.trim()).sort((a,b)=>Date.parse(a.dueAt||a.createdAt)-Date.parse(b.dueAt||b.createdAt))[0]; if(next)startBatch(next); else toast("Refresh your Buffer queue first."); return; }
+  if (action === "batch-close") { batchPost=null; render(); return; }
+  if (action === "batch-settings") { batchPost=null; navigate("settings"); return; }
+  if (action === "batch-copy") { void copy(batchText[id||""]); return; }
+  if (action === "batch-open" || action === "batch-open-all") {
+    const dest=active(ws.destinations).filter(d=>d.active!==false&&url(d.url)&&(action==="batch-open-all"?batchSelected.includes(d.id):d.id===id));
+    if(!dest.length){toast("Select an active destination.");return;}
+    // Must execute directly inside the user gesture to avoid popup-blocker delays.
+    for(const d of dest) window.open(url(d.url),"_blank");
+    toast("Posting pages requested. Review and publish manually.");
+    return;
+  }
+  if (action === "batch-save") {
+    const source=batchPost;
+    if(!source)return;
+    const dest=active(ws.destinations).filter(d=>batchSelected.includes(d.id)&&d.active!==false&&url(d.url));
+    if(!dest.length){toast("Select at least one destination.");return;}
+    void run(async()=>{
+      for(const d of dest) await save("tasks",{id:"",text:batchText[d.id]||source.text,contentRef:"buffer:"+source.id,destinationId:d.id,destinationName:d.name,destinationUrl:d.url,state:"pending",notes:"Prepared from Buffer. Publish manually."});
+      batchPost=null;
+      toast("Saved "+dest.length+" manual tasks. Nothing was published.");
+    });
+    return;
+  }
   if (action === "dismiss") {
     message = "";
     render();
