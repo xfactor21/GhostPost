@@ -281,7 +281,7 @@ function filtered(posts: Post[]) {
 }
 function postCard(post: Post) {
   const channel = channels.find((item) => item.id === post.channelId);
-  return `<article class="post-card"><div class="post-top"><div class="avatar">${escape(channel?.service?.slice(0, 2).toUpperCase() || "B")}</div><div><strong>${escape(channel?.name || post.channelId)}</strong><small>${escape(channel?.service || "Buffer")} · ${escape(date(post.sentAt || post.dueAt || post.createdAt))}</small></div>${badge(post.status, post.status === "error" ? "bad" : post.status === "sent" ? "good" : "")}</div><p class="post-text">${escape(post.text || "Media-only post")}</p>${post.assets?.length ? `<p class="hint">${post.assets.length} media attachment(s) · ${escape([...new Set(post.assets.map((a) => a.mimeType))].join(", "))}</p>` : ""}<div class="actions">${button("Prepare cross-post", "prepare-post", `data-id="${escape(post.id)}"`, "subtle")}${button("Copy text", "copy-post", `data-id="${escape(post.id)}"`, "text-button")}${link(post.externalLink, "View post")}</div></article>`;
+  return `<article class="post-card"><div class="post-top"><div class="avatar">${escape(channel?.service?.slice(0, 2).toUpperCase() || "B")}</div><div><strong>${escape(channel?.name || post.channelId)}</strong><small>${escape(channel?.service || "Buffer")} · ${escape(date(post.sentAt || post.dueAt || post.createdAt))}</small></div>${badge(post.status, post.status === "error" ? "bad" : post.status === "sent" ? "good" : "")}</div><p class="post-text">${escape(post.text || "Media-only post")}</p>${post.assets?.length ? `<p class="hint">${post.assets.length} media attachment(s) · ${escape([...new Set(post.assets.map((a) => a.mimeType))].join(", "))}</p>` : ""}<div class="actions">${button("✕ Adapt for destinations", "batch-post", `data-id="${escape(post.id)}"`, "primary")}${button("Single destination", "prepare-post", `data-id="${escape(post.id)}"`, "subtle")}${button("Copy text", "copy-post", `data-id="${escape(post.id)}"`, "text-button")}${link(post.externalLink, "View post")}</div></article>`;
 }
 function taskCard(task: Item) {
   return `<article class="task-card"><div class="section-row"><strong>${escape(task.destinationName)}</strong>${badge(task.state === "complete" ? "User-reported complete" : "Manual · pending", task.state === "complete" ? "good" : "")}</div><p>${escape(task.text?.slice(0, 180))}</p><small>${task.completedAt ? escape(date(task.completedAt)) : "Open the destination, publish manually, then confirm completion."}</small><div class="actions">${button("Open task", "open-task", `data-id="${escape(task.id)}"`, "subtle")}${button("Archive", "archive", `data-kind="tasks" data-id="${escape(task.id)}"`, "text-button")}</div></article>`;
@@ -687,6 +687,7 @@ app.addEventListener("click", (event) => {
   if (action === "coach-dismiss") { localStorage.setItem(coachKey(),"seen"); coachVisible=false; render(); return; }
   if (action === "coach-open") { showCoach(true); render(); return; }
   if (action === "next-buffer") { const next = [...queue].filter(p=>p.text.trim()).sort((a,b)=>Date.parse(a.dueAt||a.createdAt)-Date.parse(b.dueAt||b.createdAt))[0]; if(next)startBatch(next); else toast("Refresh your Buffer queue first."); return; }
+  if (action === "batch-post" && post) { startBatch(post); return; }
   if (action === "batch-close") { batchPost=null; render(); return; }
   if (action === "batch-settings") { batchPost=null; navigate("settings"); return; }
   if (action === "batch-copy") { void copy(batchText[id||""]); return; }
@@ -694,7 +695,7 @@ app.addEventListener("click", (event) => {
     const dest=active(ws.destinations).filter(d=>d.active!==false&&url(d.url)&&(action==="batch-open-all"?batchSelected.includes(d.id):d.id===id));
     if(!dest.length){toast("Select an active destination.");return;}
     // Must execute directly inside the user gesture to avoid popup-blocker delays.
-    for(const d of dest) window.open(url(d.url),"_blank");
+    for(const d of dest) window.open(url(d.url),"_blank","noopener,noreferrer");
     toast("Posting pages requested. Review and publish manually.");
     return;
   }
@@ -703,6 +704,7 @@ app.addEventListener("click", (event) => {
     if(!source)return;
     const dest=active(ws.destinations).filter(d=>batchSelected.includes(d.id)&&d.active!==false&&url(d.url));
     if(!dest.length){toast("Select at least one destination.");return;}
+    if(!confirm("Save "+dest.length+" manual posting tasks? Nothing will be published automatically."))return;
     void run(async()=>{
       for(const d of dest) await save("tasks",{id:"",text:batchText[d.id]||source.text,contentRef:"buffer:"+source.id,destinationId:d.id,destinationName:d.name,destinationUrl:d.url,state:"pending",notes:"Prepared from Buffer. Publish manually."});
       batchPost=null;
