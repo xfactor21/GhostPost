@@ -1350,3 +1350,42 @@ details[open] > summary {
     padding: 16px;
   }
 }
+
+/* Spectral Mission Control — restored original four-region planet.X layout */
+.workspace { max-width: 1850px; }
+.workspace #main { min-width:0; }
+.topbar { box-shadow:0 1px 35px #ff65b20a; }
+.hero { border-color:#ff65b242; box-shadow:inset 0 0 60px #ff65b208,0 16px 55px #0002; }
+.hero::after { content:"✕";position:absolute;right:16px;bottom:-36px;font-size:170px;font-weight:900;color:#ff65b208;pointer-events:none; }
+.insights .inset { background:linear-gradient(145deg,#352043,#1b1b2e); }
+.smart-dock { box-shadow:0 12px 50px #000a,0 0 25px #df4c8b24; }
+.smart-dock .dock-primary { color:white; }
+.coach-card { position:fixed;z-index:45;right:24px;bottom:96px;width:min(390px,calc(100vw - 32px));padding:22px;border:1px solid #ef74c08c;border-radius:17px;background:linear-gradient(145deg,#352043f8,#171223fa);box-shadow:0 18px 70px #000c,0 0 40px #ff65b21b;backdrop-filter:blur(24px); }
+.coach-card .coach-top { display:flex;align-items:center;justify-content:space-between;gap:12px; }
+.coach-card h2 { font-size:21px; }
+.coach-card p { font-size:12px; }
+.coach-card ol { padding-left:20px;color:#e4d2ef;font-size:12px;line-height:1.8; }
+.coach-card li { margin:6px 0; }
+.coach-card .actions { margin-top:14px; }
+.batch-source { padding:13px 16px;background:#b355a514;border:1px solid #d47bbf30;border-radius:12px;margin-bottom:18px; }
+.batch-source p { margin:8px 0 0;white-space:pre-wrap; }
+.batch-destination { padding:16px;margin:13px 0;border:1px solid #ae8bff35;border-radius:12px;background:#a886d70b; }
+.batch-destination .check { margin:0 0 12px; }
+.batch-destination .check strong { margin-right:7px; }
+.batch-destination textarea { margin:10px 0; }
+.batch-destination .actions { margin-top:10px; }
+#batch-dialog { width:min(750px,calc(100vw - 30px));max-height:88dvh;overflow-y:auto; }
+@media(max-width:960px) {
+ .workspace { grid-template-columns:minmax(0,1fr); }
+ .timeline { border-right:0;border-bottom:1px solid var(--border);padding:16px 22px; }
+ .timeline .timeline-items { display:none; }
+ .timeline .days { grid-template-columns:repeat(10,minmax(36px,1fr)); }
+ .insights { grid-column:auto; }
+}
+@media(max-width:660px) {
+ .coach-card { bottom:88px;right:12px; }
+ .smart-dock { z-index:30; }
+ #main { padding-bottom:115px; }
+ .timeline { padding:14px; }
+ .timeline .days { display:flex;overflow:auto; }
+}
