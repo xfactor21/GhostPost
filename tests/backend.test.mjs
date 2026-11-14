@@ -497,3 +497,19 @@ test("workspace import is atomic, owner-scoped and refuses overlapping records",
   assert.equal(result.status, 400);
   assert.equal((await call("GET", "/api/workspace")).data.drafts.length, 1);
 });
+
+test("missing Buffer configuration gives a useful error without starting OAuth", async () => {
+  const previous = process.env.BUFFER_CLIENT_SECRET;
+  delete process.env.BUFFER_CLIENT_SECRET;
+  try {
+    const before = tables.get("oauth_pending_v2")?.size || 0;
+    const status = await call("GET", "/api/buffer/status");
+    assert.equal(status.data.configured, false);
+    const result = await call("POST", "/api/buffer/start", {});
+    assert.equal(result.status, 503);
+    assert.match(result.data.error, /Open Settings/);
+    assert.equal(tables.get("oauth_pending_v2")?.size || 0, before);
+  } finally {
+    if (previous !== undefined) process.env.BUFFER_CLIENT_SECRET = previous;
+  }
+});

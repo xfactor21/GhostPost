@@ -1,6 +1,6 @@
 # GhostPost by planet.X
 
-Private publishing workspace and read-only Buffer companion. v0.3.0 migrates the alpha to GitHub, Vercel Functions, Neon Postgres, and Managed Neon Auth. No AppDeploy runtime, SDK, database, authentication, or policy hosting is used.
+Private publishing workspace and read-only Buffer companion. v0.3.1 runs the alpha on GitHub, Vercel Functions, Neon Postgres, and Managed Neon Auth. No AppDeploy runtime, SDK, database, authentication, or policy hosting is used.
 
 ## Run
 
@@ -18,7 +18,7 @@ Use Node 24, `npm ci`, and copy `.env.example` to `.env.local`. Add the server v
 
 ## Finish cutover
 
-1. At Spaceship DNS for `planet-x.co`, add CNAME `ghostpost` → `f18e7ce390001cd2.vercel-dns-017.com` (the existing authoritative nameservers stay unchanged). Verify DNS and TLS in Vercel.
+1. DNS and HTTPS for `ghostpost.planet-x.co` are verified. The Spaceship CNAME is already configured; no further DNS changes are needed.
 2. In the existing Buffer developer application's approved redirect URLs, add `https://ghostpost.planet-x.co/api/auth/buffer/callback`. Retain the demo callback until migration is verified. Set `BUFFER_CLIENT_ID` and `BUFFER_CLIENT_SECRET` as sensitive Production environment variables in Vercel, then explicitly redeploy. Never paste secrets into an issue, commit, or chat.
 3. Sign in to the new app, reconnect Buffer, and verify channels, queue and history. Third-party app review and OAuth availability are controlled by Buffer.
 4. In the old demo, Settings → Export workspace JSON. In the new app, Settings → Import workspace JSON. Imports validate every record, preserve current records, reject ID overlaps, and commit atomically against the current revision. Credentials are excluded. An import never associates accounts by email.
@@ -29,3 +29,7 @@ Use Node 24, `npm ci`, and copy `.env.example` to `.env.local`. Add the server v
 Buffer reads require `posts:read account:read offline_access`. The app does not publish posts through the API. Manual completion is explicitly user-reported. New users sign into their own isolated workspaces. Archive preserves records for recovery; account deletion remains an operator-assisted action. The alpha supports 100 records per collection and 220 KB per workspace.
 
 The privacy policy is served locally at `/privacy`. No analytics or advertising SDK is installed. The current Neon configuration uses shared authentication email delivery; custom production SMTP and delivery validation remain a production-hardening task before broad signup promotion.
+
+## v0.3.1 usability update
+
+Focused single workspace with Home, Scheduled, Drafts, History and Settings. Persistent side panels and duplicate floating controls were removed. Date filters remain available on activity screens. Home gives quick access to recent drafts; draft metadata and preview are collapsible. Missing Buffer credentials produce an actionable setup notice before OAuth initialization. Buffer configuration still requires the two existing client values in Vercel and the new redirect registered in Buffer. No existing user records or credentials are changed by this update.

@@ -514,7 +514,7 @@ export const handler = router({
       return json(
         {
           status: encryptionReady && databaseReady ? "ok" : "degraded",
-          version: "0.3.0",
+          version: "0.3.1",
           encryptionReady,
           databaseReady,
         },
@@ -575,6 +575,18 @@ export const handler = router({
   "POST /api/buffer/start": [
     requireAuth(),
     secured(async ({ user }) => {
+      const configuredNames = await secrets.listSecretNames();
+      if (
+        ![
+          "BUFFER_CLIENT_ID",
+          "BUFFER_CLIENT_SECRET",
+          "GHOSTPOST_TOKEN_ENCRYPTION_KEY",
+        ].every((name) => configuredNames.includes(name))
+      )
+        throw new PublicError(
+          "Buffer is not configured on this deployment yet. Open Settings for setup instructions.",
+          503,
+        );
       await cooldown(user!.userId, "oauth", 5000);
       await encryptionKey();
       const saved = await connection(user!.userId);
