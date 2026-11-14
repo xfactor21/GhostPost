@@ -155,6 +155,26 @@ function variantFor(source:string,destination:Item) {
  if(platform.includes("bluesky")||platform.includes("threads"))return clean.length>280?clean.slice(0,277).trimEnd()+"…":clean;
  return clean;
 }
+type ShareLaunch = { url:string; prefilled:boolean; explanation:string };
+function shareLaunch(destination:Item,caption:string):ShareLaunch {
+ const target=url(destination.url);
+ const platform=(destination.platform||"").toLowerCase();
+ const text=caption.trim();
+ const u=new URL(target);
+ const host=u.hostname.toLowerCase();
+ if((platform.includes("reddit")||host.endsWith("reddit.com"))&&host.endsWith("reddit.com")) {
+  const title=text.split("\n").find(Boolean)?.slice(0,300)||"New post";
+  const path=u.pathname.match(/^\/r\/([A-Za-z0-9_]+)(?:\/|$)/);
+  const params=new URLSearchParams({selftext:text,title});
+  if(path)params.set("sr",path[1]);
+  return {url:"https://www.reddit.com/submit?"+params,prefilled:true,explanation:"Reddit submit intent: title and text."};
+ }
+ if((platform.includes("bluesky")||host==="bsky.app")&&host==="bsky.app")
+  return {url:"https://bsky.app/intent/compose?"+new URLSearchParams({text}),prefilled:true,explanation:"Bluesky compose intent."};
+ if((platform==="x"||platform==="twitter"||host==="x.com"||host==="twitter.com")&&(host==="x.com"||host==="twitter.com"))
+  return {url:"https://twitter.com/intent/tweet?"+new URLSearchParams({text}),prefilled:true,explanation:"X/Twitter compose intent."};
+ return {url:target,prefilled:false,explanation:"No verified text-prefill URL. Use system Share or copy the caption."};
+}
 function startBatch(post:Post) {
  batchPost=post;
  batchSourceId=post.id;
@@ -167,7 +187,7 @@ function startBatch(post:Post) {
 function batchPanel(){
  if(!batchPost)return "";
  const dest=active(ws.destinations).filter(d=>d.active!==false&&url(d.url));
- return `<dialog id="batch-dialog" aria-labelledby="batch-title"><div class="section-row"><div><span class="section-label">✕ SPECTRAL WORKFLOW</span><h2 id="batch-title">One post. Many destinations.</h2></div>${button("Close","batch-close",'aria-label="Close batch workflow"',"subtle")}</div><p class="hint">One representative Buffer post is used for this workflow. Edit each destination version. No automatic publishing.</p><div class="batch-source"><small>BUFFER SOURCE · ${escape(batchPost.status)}</small><p>${escape(batchPost.text.slice(0,450))}</p></div>${dest.length?dest.map(d=>`<div class="batch-destination"><label class="check"><input type="checkbox" data-batch-select="${escape(d.id)}" ${batchSelected.includes(d.id)?"checked":""}><strong>${escape(d.name)}</strong>${badge(d.platform||"Custom")}</label><textarea data-batch-copy="${escape(d.id)}" aria-label="Adapted copy for ${escape(d.name)}" rows="4" maxlength="10000">${escape(batchText[d.id]||"")}</textarea><small>${escape(d.instructions||"Check this destination's current posting rules.")}</small><div class="actions">${button("Copy caption","batch-copy",`data-id="${escape(d.id)}"`,"subtle")}${button("Open posting page ↗","batch-open",`data-id="${escape(d.id)}"`,"subtle")}</div></div>`).join(""):`<div class="empty"><h3>No destinations yet</h3><p>Add your Reddit community, personal profile, or custom posting URL in Settings.</p>${button("Add destination","batch-settings","","primary")}</div>`}<div class="actions">${button("Open selected pages ↗","batch-open-all",!dest.length?"disabled":"","subtle")}${button("Save selected manual tasks","batch-save",!dest.length||busy?"disabled":"","primary")}</div><p class="hint">Your browser may block multiple tabs. Pages open in the current browser; GhostPost cannot select other installed browsers. Review, publish manually, then record completion.</p></dialog>`;
+ return `<dialog id="batch-dialog" aria-labelledby="batch-title"><div class="section-row"><div><span class="section-label">✕ SPECTRAL WORKFLOW</span><h2 id="batch-title">One post. Many destinations.</h2></div>${button("Close","batch-close",'aria-label="Close batch workflow"',"subtle")}</div><p class="hint">One representative Buffer post is used for this workflow. Edit each destination version. No automatic publishing.</p><div class="batch-source"><small>BUFFER SOURCE · ${escape(batchPost.status)}</small><p>${escape(batchPost.text.slice(0,450))}</p></div>${dest.length?dest.map(d=>`<div class="batch-destination"><label class="check"><input type="checkbox" data-batch-select="${escape(d.id)}" ${batchSelected.includes(d.id)?"checked":""}><strong>${escape(d.name)}</strong>${badge(d.platform||"Custom")}</label><textarea data-batch-copy="${escape(d.id)}" aria-label="Adapted copy for ${escape(d.name)}" rows="4" maxlength="10000">${escape(batchText[d.id]||"")}</textarea><small>${escape(d.instructions||"Check this destination's current posting rules.")}</small><div class="actions">${button("Copy caption","batch-copy",`data-id="${escape(d.id)}"`,"subtle")}${button(shareLaunch(d,batchText[d.id]||"").prefilled?"Open prefilled composer ↗":"Open posting page ↗","batch-open",`data-id="${escape(d.id)}"`,"subtle")}${button("System Share ↗","batch-share",`data-id="${escape(d.id)}"`,"text-button")}</div></div>`).join(""):`<div class="empty"><h3>No destinations yet</h3><p>Add your Reddit community, personal profile, or custom posting URL in Settings.</p>${button("Add destination","batch-settings","","primary")}</div>`}<div class="actions">${button("Open selected pages ↗","batch-open-all",!dest.length?"disabled":"","subtle")}${button("Save selected manual tasks","batch-save",!dest.length||busy?"disabled":"","primary")}</div><p class="hint">Supported compose intents pass text to the platform. Other sites may need manual paste. System Share can hand content to an installed app when supported. Review before publishing.</p></dialog>`;
 }
 const guide: Record<View, { title:string; detail:string; steps:string[] }> = {
  today:{title:"Welcome to Mission Control",detail:"Your private bridge from Buffer to the places you publish by hand.",steps:["Connect Buffer and refresh your channels.","Use Next post to prepare manual cross-posts.","Track what you published yourself."]},
@@ -733,12 +753,20 @@ app.addEventListener("click", (event) => {
   if (action === "batch-close") { batchPost=null; render(); return; }
   if (action === "batch-settings") { batchPost=null; navigate("settings"); return; }
   if (action === "batch-copy") { void copy(batchText[id||""]); return; }
+  if (action === "batch-share") {
+    const d=ws.destinations.find(x=>x.id===id);
+    if(!d)return;
+    if(navigator.share) {
+      void navigator.share({text:batchText[d.id]||""}).catch(err=>{if(err?.name!=="AbortError")toast("System Share unavailable. Use Copy caption.");});
+    } else toast("System Share isn't available in this browser. Use Copy caption.");
+    return;
+  }
   if (action === "batch-open" || action === "batch-open-all") {
     const dest=active(ws.destinations).filter(d=>d.active!==false&&url(d.url)&&(action==="batch-open-all"?batchSelected.includes(d.id):d.id===id));
     if(!dest.length){toast("Select an active destination.");return;}
-    // Must execute directly inside the user gesture to avoid popup-blocker delays.
-    for(const d of dest) window.open(url(d.url),"_blank","noopener,noreferrer");
-    toast("Posting pages requested. Review and publish manually.");
+    const outcomes=dest.map(d=>shareLaunch(d,batchText[d.id]||""));
+    for(const launch of outcomes)window.open(launch.url,"_blank","noopener,noreferrer");
+    toast(outcomes.every(x=>x.prefilled)?"Opened prefilled composers. Review before posting.":"Opened supported composers and posting pages. Unsupported destinations need manual paste.");
     return;
   }
   if (action === "batch-save") {
