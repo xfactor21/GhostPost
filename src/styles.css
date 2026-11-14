@@ -1389,3 +1389,37 @@ details[open] > summary {
  .timeline { padding:14px; }
  .timeline .days { display:flex;overflow:auto; }
 }
+
+/* Spectral Campaign Radar — tactile, accessible, reduced-motion aware */
+.campaign-card { position:relative; overflow:hidden; padding:0; border:1px solid #a16aff5c; background:linear-gradient(135deg,#25172ef5,#161729 60%,#22162ef5); box-shadow:0 12px 44px #05030a55,0 0 0 1px #ff62b30c; transition:transform .28s cubic-bezier(.2,.8,.2,1),border-color .28s,box-shadow .28s; }
+.campaign-card::before { content:""; position:absolute; inset:0 0 auto; height:2px; background:linear-gradient(90deg,#ff55b5,#a264ff,#39d9fa); opacity:.9; }
+.campaign-card:hover { transform:translateY(-3px); border-color:#e576d88a; box-shadow:0 20px 50px #05030a7a,0 0 35px #ff55b51a; }
+.campaign-head { display:flex;align-items:center;gap:14px;padding:19px 21px 15px; }
+.campaign-head h3 { margin:3px 0 2px; font-size:19px; letter-spacing:-.4px; }
+.campaign-head small { color:#bcaac9; }
+.campaign-ghost { width:46px;height:52px;flex:none;filter:drop-shadow(0 0 12px #f25db34d);animation:ghost-hover 4s ease-in-out infinite; }
+.campaign-ghost svg { width:100%;height:100%; }
+.campaign-count { margin-left:auto; font-weight:850; font-size:25px; color:#4adcf8; text-shadow:0 0 20px #4adcf855; }
+.campaign-tabs { display:flex;gap:8px;overflow-x:auto;padding:3px 19px 15px;scrollbar-width:thin; }
+.campaign-tab { display:flex;flex-direction:column;align-items:flex-start;gap:3px;min-width:94px;max-width:180px;flex:1;border:1px solid #846c9c70;background:#ffffff06;color:#c6b6d6;padding:10px 13px;border-radius:11px;transition:transform .2s,border-color .2s,background .2s,box-shadow .2s; }
+.campaign-tab small { display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;opacity:.7;font-weight:400; }
+.campaign-tab.active { font-weight:800;font-size:14px;color:#fff;border-color:#f16db6;background:linear-gradient(135deg,#f75ba42e,#9a5bfb20);box-shadow:inset 0 0 25px #ff61af16,0 0 20px #ff55b51d;transform:translateY(-2px); }
+.campaign-tab:focus-visible,.campaign-card button:focus-visible { outline:2px solid #43dafa;outline-offset:3px; }
+.campaign-copy { margin:0 19px;padding:18px 19px;border:1px solid #b97ef82d;border-radius:13px;background:linear-gradient(145deg,#30203c75,#1b182b90);animation:campaign-reveal .24s ease-out; }
+.campaign-copy-head { display:flex;justify-content:space-between;align-items:center;color:#54dcf4;font-size:12px; }
+.campaign-copy .post-text { white-space:pre-wrap;max-height:220px;overflow:auto;line-height:1.65;margin:13px 0 15px; }
+.campaign-media { display:flex;gap:8px;flex-wrap:wrap; }
+.media-tile { width:69px;height:65px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:3px;background:linear-gradient(140deg,#9b4cf32b,#4adcf71b);border:1px solid #ad85ee56;border-radius:10px;font-size:24px;color:#cbb2ff; }
+.media-tile small { font-size:9px;color:#c2b3d5; }
+.media-more { align-self:center;color:#d5c5ea;font-weight:700; }
+.campaign-media-empty { display:flex;align-items:center;gap:9px;color:#9287a5;font-size:12px; }
+.campaign-media-empty span { font-size:19px;color:#ff71bd; }
+.campaign-actions { padding:13px 19px 20px; }
+.campaign-actions .hint { font-size:11px;line-height:1.6; }
+.campaign-actions .actions { margin-top:12px; }
+.batch-destination { transition:border-color .25s,box-shadow .25s,transform .25s; }
+.batch-destination:focus-within { border-color:#b973ff;box-shadow:0 0 24px #b973ff16; }
+@keyframes campaign-reveal { from {opacity:.45;transform:translateY(5px)} to {opacity:1;transform:translateY(0)} }
+@keyframes ghost-hover { 0%,100% {transform:translateY(0) rotate(-2deg)} 50% {transform:translateY(-6px) rotate(2deg)} }
+@media(max-width:600px) { .campaign-head{padding:15px 13px 12px;gap:10px} .campaign-tabs{padding:4px 12px 13px} .campaign-copy{margin:0 12px;padding:14px} .campaign-actions{padding:12px} .campaign-actions .actions{display:flex;flex-wrap:wrap} .campaign-count{font-size:19px} }
+@media(prefers-reduced-motion:reduce) { .campaign-card,.campaign-tab,.batch-destination{transition:none!important} .campaign-ghost,.campaign-copy{animation:none!important} .campaign-card:hover{transform:none} }
