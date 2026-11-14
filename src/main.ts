@@ -107,6 +107,45 @@ let prepare: Item | null = null;
 let toastTimer: ReturnType<typeof setTimeout>;
 let coachVisible = false;
 let batchPost: Post | null = null;
+let batchSourceId = "";
+let expandedCampaigns = new Set<string>();
+function postTime(post:Post){return Date.parse(post.dueAt||post.sentAt||post.createdAt)||0;}
+function fingerprint(post:Post) {
+ return post.text.toLowerCase().replace(/https?:\/\/\S+/g," ").replace(/#[\w]+/g," ").replace(/[^a-z0-9\s]/g," ").replace(/\s+/g," ").trim();
+}
+function similarity(a:Post,b:Post) {
+ const aa=new Set(fingerprint(a).split(" ").filter(w=>w.length>2));
+ const bb=new Set(fingerprint(b).split(" ").filter(w=>w.length>2));
+ if(!aa.size||!bb.size)return 0;
+ let common=0;for(const w of aa)if(bb.has(w))common++;
+ return 2*common/(aa.size+bb.size);
+}
+function likelySameCampaign(a:Post,b:Post) {
+ if(a.channelId===b.channelId||a.id===b.id)return false;
+ const delta=Math.abs(postTime(a)-postTime(b));
+ if(delta>48*3600*1000)return false;
+ const af=fingerprint(a),bf=fingerprint(b);
+ return af.length>=24&&bf.length>=24&&(af===bf||similarity(a,b)>=0.78);
+}
+function campaignGroups(posts:Post[]) {
+ const groups:Post[][]=[];
+ for(const post of [...posts].sort((a,b)=>postTime(a)-postTime(b))) {
+  const match=groups.find(group=>group.some(other=>likelySameCampaign(other,post)));
+  if(match)match.push(post);else groups.push([post]);
+ }
+ return groups;
+}
+function campaignCard(group:Post[]) {
+ const lead=group[0];
+ if(group.length===1)return postCard(lead);
+ const open=expandedCampaigns.has(lead.id);
+ const platforms=[...new Set(group.map(p=>channels.find(c=>c.id===p.channelId)?.service||p.channelId))];
+ return `<article class="post-card campaign-card"><div class="section-row"><div><span class="section-label">✕ POSSIBLE BUFFER CAMPAIGN</span><h3>${group.length} channel versions · 1 manual workflow</h3></div>${badge(platforms.join(" · "))}</div><p class="post-text">${escape(lead.text.slice(0,300))}</p><p class="hint">Grouped by similar text across different channels within 48 hours. Review before using; Buffer does not supply a confirmed campaign ID.</p><div class="actions">${button("Prepare once for all destinations","batch-post",`data-id="${escape(lead.id)}"`,"primary")}${button(open?"Hide source versions":"Review "+group.length+" versions","campaign-toggle",`data-id="${escape(lead.id)}"`,"subtle")}</div>${open?group.map(postCard).join(""):""}</article>`;
+}
+function nextCampaignPost(){
+ const groups=campaignGroups(queue.filter(p=>p.text.trim()));
+ return groups.sort((a,b)=>postTime(a[0])-postTime(b[0]))[0]?.[0]||null;
+}
 let batchSelected: string[] = [];
 let batchText: Record<string,string> = {};
 function variantFor(source:string,destination:Item) {
@@ -118,6 +157,7 @@ function variantFor(source:string,destination:Item) {
 }
 function startBatch(post:Post) {
  batchPost=post;
+ batchSourceId=post.id;
  const dest=active(ws.destinations).filter(d=>d.active!==false&&url(d.url));
  batchSelected=dest.map(d=>d.id);
  batchText=Object.fromEntries(dest.map(d=>[d.id,variantFor(post.text,d)]));
@@ -127,7 +167,7 @@ function startBatch(post:Post) {
 function batchPanel(){
  if(!batchPost)return "";
  const dest=active(ws.destinations).filter(d=>d.active!==false&&url(d.url));
- return `<dialog id="batch-dialog" aria-labelledby="batch-title"><div class="section-row"><div><span class="section-label">✕ SPECTRAL WORKFLOW</span><h2 id="batch-title">One post. Many destinations.</h2></div>${button("Close","batch-close",'aria-label="Close batch workflow"',"subtle")}</div><p class="hint">Real Buffer source. Editable, rule-based platform variants—not AI-generated content. GhostPost never publishes for you.</p><div class="batch-source"><small>BUFFER SOURCE · ${escape(batchPost.status)}</small><p>${escape(batchPost.text.slice(0,450))}</p></div>${dest.length?dest.map(d=>`<div class="batch-destination"><label class="check"><input type="checkbox" data-batch-select="${escape(d.id)}" ${batchSelected.includes(d.id)?"checked":""}><strong>${escape(d.name)}</strong>${badge(d.platform||"Custom")}</label><textarea data-batch-copy="${escape(d.id)}" aria-label="Adapted copy for ${escape(d.name)}" rows="4" maxlength="10000">${escape(batchText[d.id]||"")}</textarea><small>${escape(d.instructions||"Check this destination's current posting rules.")}</small><div class="actions">${button("Copy caption","batch-copy",`data-id="${escape(d.id)}"`,"subtle")}${button("Open posting page ↗","batch-open",`data-id="${escape(d.id)}"`,"subtle")}</div></div>`).join(""):`<div class="empty"><h3>No destinations yet</h3><p>Add your Reddit community, personal profile, or custom posting URL in Settings.</p>${button("Add destination","batch-settings","","primary")}</div>`}<div class="actions">${button("Open selected pages ↗","batch-open-all",!dest.length?"disabled":"","subtle")}${button("Save selected manual tasks","batch-save",!dest.length||busy?"disabled":"","primary")}</div><p class="hint">Your browser may block multiple tabs. Pages open in the current browser; GhostPost cannot select other installed browsers. Review, publish manually, then record completion.</p></dialog>`;
+ return `<dialog id="batch-dialog" aria-labelledby="batch-title"><div class="section-row"><div><span class="section-label">✕ SPECTRAL WORKFLOW</span><h2 id="batch-title">One post. Many destinations.</h2></div>${button("Close","batch-close",'aria-label="Close batch workflow"',"subtle")}</div><p class="hint">One representative Buffer post is used for this workflow. Edit each destination version. No automatic publishing.</p><div class="batch-source"><small>BUFFER SOURCE · ${escape(batchPost.status)}</small><p>${escape(batchPost.text.slice(0,450))}</p></div>${dest.length?dest.map(d=>`<div class="batch-destination"><label class="check"><input type="checkbox" data-batch-select="${escape(d.id)}" ${batchSelected.includes(d.id)?"checked":""}><strong>${escape(d.name)}</strong>${badge(d.platform||"Custom")}</label><textarea data-batch-copy="${escape(d.id)}" aria-label="Adapted copy for ${escape(d.name)}" rows="4" maxlength="10000">${escape(batchText[d.id]||"")}</textarea><small>${escape(d.instructions||"Check this destination's current posting rules.")}</small><div class="actions">${button("Copy caption","batch-copy",`data-id="${escape(d.id)}"`,"subtle")}${button("Open posting page ↗","batch-open",`data-id="${escape(d.id)}"`,"subtle")}</div></div>`).join(""):`<div class="empty"><h3>No destinations yet</h3><p>Add your Reddit community, personal profile, or custom posting URL in Settings.</p>${button("Add destination","batch-settings","","primary")}</div>`}<div class="actions">${button("Open selected pages ↗","batch-open-all",!dest.length?"disabled":"","subtle")}${button("Save selected manual tasks","batch-save",!dest.length||busy?"disabled":"","primary")}</div><p class="hint">Your browser may block multiple tabs. Pages open in the current browser; GhostPost cannot select other installed browsers. Review, publish manually, then record completion.</p></dialog>`;
 }
 const guide: Record<View, { title:string; detail:string; steps:string[] }> = {
  today:{title:"Welcome to Mission Control",detail:"Your private bridge from Buffer to the places you publish by hand.",steps:["Connect Buffer and refresh your channels.","Use Next post to prepare manual cross-posts.","Track what you published yourself."]},
@@ -321,7 +361,8 @@ function todayView() {
 }
 function queueView() {
   const posts = filtered(queue);
-  return `<div class="view-title"><div class="section-label">KNOW WHAT’S COMING</div><h1>Your queue<span class="pink">.</span></h1><p>Scheduled, in-flight, approval and draft records from Buffer.</p></div>${filters()}<div class="actions">${button(busy ? "Refreshing…" : "Refresh queue", "sync-queue", busy || !linked ? "disabled" : "", "subtle")}</div>${posts.length ? posts.map(postCard).join("") : noData("No queue records to show", queueLoaded ? "Nothing matches these filters in the loaded pages." : "Connect Buffer and refresh the queue to load available posts.")}${queueCursor ? button("Load more queue records", "more-queue", busy ? "disabled" : "", "subtle wide") : ""}`;
+  const groups=campaignGroups(posts);
+  return `<div class="view-title"><div class="section-label">KNOW WHAT’S COMING</div><h1>Your queue<span class="pink">.</span></h1><p>Scheduled, in-flight, approval and draft records from Buffer. Similar channel versions are grouped as possible campaigns, not confirmed matches.</p></div>${filters()}<div class="actions">${button(busy ? "Refreshing…" : "Refresh queue", "sync-queue", busy || !linked ? "disabled" : "", "subtle")}</div>${posts.length ? groups.map(campaignCard).join("") : noData("No queue records to show", queueLoaded ? "Nothing matches these filters in the loaded pages." : "Connect Buffer and refresh the queue to load available posts.")}${queueCursor ? button("Load more queue records", "more-queue", busy ? "disabled" : "", "subtle wide") : ""}`;
 }
 function field(
   label: string,
@@ -410,7 +451,7 @@ function preparePanel() {
 function insightsPanel() {
  const pending = active(ws.tasks).filter(t => t.state !== "complete").length;
  const completed = active(ws.tasks).filter(t => t.state === "complete").length;
- const next = [...queue].filter(p => p.text.trim()).sort((a,b) => Date.parse(a.dueAt || a.createdAt)-Date.parse(b.dueAt || b.createdAt))[0];
+ const next = nextCampaignPost();
  return `<aside class="insights" aria-label="Mission intelligence"><span class="section-label">✦ LIVE INTELLIGENCE</span><h2>Signal check<span class="cyan">.</span></h2><div class="health"><span class="dot ${linked&&!reconnect?"healthy":"danger"}"></span><strong>${linked&&!reconnect?"Buffer linked":reconnect?"Reconnect needed":"Buffer offline"}</strong><small>${lastSync?"Last sync "+escape(date(lastSync)):"No verified sync yet"}</small></div><div class="metric-grid"><div><strong>${channels.length}</strong><span>Channels loaded</span></div><div><strong>${queue.length}</strong><span>Queue loaded</span></div><div><strong>${pending}</strong><span>Manual pending</span></div><div><strong>${completed}</strong><span>User-completed</span></div></div><div class="panel inset"><h3>Next signal</h3>${next?`<p>${escape(next.text.slice(0,125))}</p>${button("Prepare next ↗","next-buffer","","primary")}`:`<p>${linked?"Refresh your queue to find the next post.":"Connect Buffer to activate your publishing radar."}</p>`}</div><div class="footnote"><span class="dot"></span><p>Real Buffer data only. Manual completions are user-reported.</p></div></aside>`;
 }
 function dock() {
@@ -686,7 +727,8 @@ app.addEventListener("click", (event) => {
   const post = [...queue, ...history].find((item) => item.id === id);
   if (action === "coach-dismiss") { localStorage.setItem(coachKey(),"seen"); coachVisible=false; render(); return; }
   if (action === "coach-open") { showCoach(true); render(); return; }
-  if (action === "next-buffer") { const next = [...queue].filter(p=>p.text.trim()).sort((a,b)=>Date.parse(a.dueAt||a.createdAt)-Date.parse(b.dueAt||b.createdAt))[0]; if(next)startBatch(next); else toast("Refresh your Buffer queue first."); return; }
+  if (action === "next-buffer") { const next = nextCampaignPost(); if(next)startBatch(next); else toast("Refresh your Buffer queue first."); return; }
+  if (action === "campaign-toggle") { if(id){if(expandedCampaigns.has(id))expandedCampaigns.delete(id);else expandedCampaigns.add(id);} render(); return; }
   if (action === "batch-post" && post) { startBatch(post); return; }
   if (action === "batch-close") { batchPost=null; render(); return; }
   if (action === "batch-settings") { batchPost=null; navigate("settings"); return; }
