@@ -15,8 +15,12 @@ export default function Privacy() {
         We store your account identity, drafts, destinations, manual posting
         records and sync diagnostics. If you connect Buffer, GhostPost reads
         your account, organizations, connected channels, queued posts and
-        publishing history using your authorization. It does not publish social
-        posts through the API in this alpha.
+        publishing history using your authorization. A bounded server-memory
+        media cache holds post captions and media references for reuse for up to
+        one minute; it does not save those references in our database. Downloads
+        retrieve available files from their source hosts and are streamed to
+        your browser without storing the files on our server. It does not
+        publish social posts through the API in this alpha.
       </p>
       <h2>Storage and service providers</h2>
       <p>

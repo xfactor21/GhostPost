@@ -4,13 +4,17 @@ import {
   db,
   secrets,
   requireAuth,
-  isAppDatabaseError,
+  errorResponse,
 } from "./platform";
 import type {
   RouterContext,
   RouterMiddleware,
   RouterResponse,
 } from "./platform";
+import { normalizeAssets, downloadMedia } from "./media";
+import type { MediaAsset } from "../shared/media";
+import { mediaExtension } from "../shared/media";
+import { PublicError, stage } from "./diagnostics";
 import { createHash } from "node:crypto";
 import {
   hash,
@@ -75,7 +79,9 @@ type Post = {
   dueAt?: string;
   sentAt?: string;
   createdAt: string;
-  assets?: { id: string; mimeType: string }[];
+  contentItemId?: string | null;
+  ideaId?: string | null;
+  assets?: MediaAsset[];
   externalLink?: string;
 };
 type Page = {
@@ -83,13 +89,6 @@ type Page = {
   pageInfo: { hasNextPage: boolean; endCursor?: string };
 };
 
-class PublicError extends Error {
-  status: number;
-  constructor(message: string, status = 400) {
-    super(message);
-    this.status = status;
-  }
-}
 const secured =
   (fn: (ctx: RouterContext) => Promise<RouterResponse>): RouterMiddleware =>
   async (ctx) => {
@@ -103,22 +102,7 @@ const secured =
       };
       return result;
     } catch (err) {
-      let status = 503;
-      let message =
-        "This operation could not be completed. Please retry or reconnect Buffer.";
-      if (err instanceof PublicError) {
-        status = err.status;
-        message = err.message;
-      } else if (isAppDatabaseError(err)) {
-        status = err.code === "AppDatabaseQuotaExceeded" ? 429 : 503;
-        message =
-          status === 429
-            ? "Storage limit reached. Please wait before retrying."
-            : "Storage could not confirm this operation. Reload before retrying.";
-      }
-      const result = json({ error: message }, status);
-      result.headers["Cache-Control"] = "no-store";
-      return result;
+      return errorResponse(err);
     }
   };
 function input(body: unknown): Record<string, unknown> {
@@ -132,7 +116,15 @@ function input(body: unknown): Record<string, unknown> {
   return body as Record<string, unknown>;
 }
 async function encryptionKey() {
-  return parseKey(await secrets.readSecret("GHOSTPOST_TOKEN_ENCRYPTION_KEY"));
+  try {
+    return parseKey(await secrets.readSecret("GHOSTPOST_TOKEN_ENCRYPTION_KEY"));
+  } catch {
+    throw new PublicError(
+      "Secure Buffer storage needs a valid encryption key. Contact the deployment owner.",
+      503,
+      "ENCRYPTION_CONFIGURATION",
+    );
+  }
 }
 async function connection(userId: string): Promise<Connection> {
   const id = hash(userId);
@@ -195,7 +187,11 @@ async function patchConnection(
 async function accessToken(userId: string): Promise<string> {
   const saved = await connection(userId);
   if (!saved.ciphertext || !saved.iv || !saved.tag || saved.reconnectRequired)
-    throw new PublicError("Reconnect Buffer to synchronize.", 401);
+    throw new PublicError(
+      "Reconnect Buffer to synchronize.",
+      401,
+      "BUFFER_CONNECTION_REQUIRED",
+    );
   const key = await encryptionKey();
   let token: TokenData;
   try {
@@ -204,21 +200,25 @@ async function accessToken(userId: string): Promise<string> {
     throw new PublicError(
       "Stored connection cannot be opened. Reconnect Buffer.",
       409,
+      "BUFFER_CONNECTION_UNREADABLE",
     );
   }
   if (saved.refreshId)
     throw new PublicError(
       "A token refresh is pending. If this persists, reconnect Buffer.",
       409,
+      "BUFFER_REFRESH_PENDING",
     );
   if (!needsRefresh(saved.expiresAt)) return token.access_token;
   if (!token.refresh_token)
     throw new PublicError(
       "Buffer authorization expired. Reconnect Buffer.",
       401,
+      "BUFFER_CONNECTION_EXPIRED",
     );
   // Never steal a durable refresh lock: an unknown exchange outcome requires reconnect.
   const refreshId = nonce();
+  stage("buffer.token.refresh");
   await patchConnection(
     userId,
     saved,
@@ -264,6 +264,7 @@ async function accessToken(userId: string): Promise<string> {
     throw new PublicError(
       "Token refresh could not be safely confirmed. Reconnect Buffer.",
       401,
+      "BUFFER_REFRESH_UNCONFIRMED",
     );
   }
 }
@@ -283,28 +284,42 @@ async function graph<T>(token: string, query: string): Promise<T> {
     throw new PublicError(
       "Buffer did not respond. Try manual refresh again later.",
       502,
+      "BUFFER_SYNC_TIMEOUT",
     );
   }
   if (response.status === 401)
     throw new PublicError(
       "Buffer access was revoked or expired. Reconnect Buffer.",
       401,
+      "BUFFER_ACCESS_REVOKED",
     );
   if (response.status === 429)
     throw new PublicError(
       "Buffer rate limit reached. Wait at least a minute before refreshing.",
       429,
+      "BUFFER_SYNC_RATE_LIMITED",
     );
   if (!response.ok)
     throw new PublicError(
       "Buffer is unavailable. Your GhostPost records are preserved.",
       502,
+      "BUFFER_SYNC_UNAVAILABLE",
     );
-  const result = (await response.json()) as { data?: T; errors?: unknown[] };
+  let result: { data?: T; errors?: unknown[] };
+  try {
+    result = await response.json();
+  } catch {
+    throw new PublicError(
+      "Buffer returned an unreadable response. Please retry later.",
+      502,
+      "BUFFER_RESPONSE_INVALID",
+    );
+  }
   if (result.errors?.length || !result.data)
     throw new PublicError(
       "Buffer rejected this read. Check permissions and try reconnecting.",
       502,
+      "BUFFER_SYNC_REJECTED",
     );
   return result.data;
 }
@@ -349,6 +364,86 @@ async function workspace(userId: string): Promise<Workspace> {
     throw new PublicError("Workspace could not be verified.", 403);
   return saved;
 }
+function identifier(value: unknown) {
+  try {
+    return validId(value);
+  } catch {
+    throw new PublicError("Invalid record identifier.", 400, "INVALID_ID");
+  }
+}
+function sourceReference(value: Record<string, unknown>) {
+  if (!value.sourcePostId) return {};
+  const sourcePostId = identifier(value.sourcePostId),
+    sourceChannelId = identifier(value.sourceChannelId);
+  const sourceAssetKeys =
+    value.sourceAssetKeys === undefined ? [] : value.sourceAssetKeys;
+  if (!Array.isArray(sourceAssetKeys) || sourceAssetKeys.length > 20)
+    throw new PublicError("Invalid source media selection.");
+  return {
+    sourcePostId,
+    sourceChannelId,
+    sourceAssetKeys: sourceAssetKeys.map(identifier),
+  };
+}
+// Short-lived, bounded process cache. No source URLs or captions are persisted
+// as a side effect of media previews; each hit still requires a live connection.
+const mediaCache = new Map<string, { at: number; post: Post }>();
+function mediaCacheKey(userId: string, postId: string, token: string) {
+  return hash(userId + ":" + postId + ":" + hash(token));
+}
+function pruneMediaCache() {
+  for (const [key, value] of mediaCache) {
+    if (Date.now() - value.at >= 60000) mediaCache.delete(key);
+  }
+}
+function cacheMedia(userId: string, post: Post, token: string) {
+  pruneMediaCache();
+  const key = mediaCacheKey(userId, post.id, token);
+  mediaCache.delete(key);
+  mediaCache.set(key, { at: Date.now(), post });
+  while (mediaCache.size > 100)
+    mediaCache.delete(mediaCache.keys().next().value!);
+}
+async function ownedPost(userId: string, id: string, fresh = false) {
+  stage("buffer.connection.lookup");
+  const token = await accessToken(userId);
+  if (!fresh) {
+    stage("buffer.media.cache");
+    pruneMediaCache();
+    const cached = mediaCache.get(mediaCacheKey(userId, id, token));
+    if (cached) return cached.post;
+  }
+
+  stage("buffer.post.lookup");
+  const result = await graph<{ post: Post }>(
+    token,
+    `query GhostPostMedia { post(input:{id:${JSON.stringify(identifier(id))}}) { id text channelId status dueAt sentAt createdAt externalLink contentItemId ideaId assets { id mimeType source thumbnail } } }`,
+  );
+  if (!result.post || result.post.id !== id)
+    throw new PublicError(
+      "This source post is unavailable in your Buffer account.",
+      404,
+      "BUFFER_POST_UNAVAILABLE",
+    );
+  const post = {
+    ...result.post,
+    text: result.post.text.slice(0, 10000),
+    assets: normalizeAssets(result.post.id, result.post.assets),
+  };
+  cacheMedia(userId, post, token);
+  return post;
+}
+async function mediaAllowance(userId: string, thumbnail: boolean) {
+  stage("buffer.media.rate_limit");
+  const id = hash(userId + ":" + (thumbnail ? "thumbnail" : "original")),
+    window = Math.floor(Date.now() / 60000);
+  if (!(await db.tx.consume("media_limits", id, window, thumbnail ? 100 : 12)))
+    throw new PublicError(
+      "Media download limit reached. Wait a minute and retry.",
+      429,
+      "MEDIA_RATE_LIMITED",
+    );
+}
 function validated(
   kind: string,
   value: Record<string, unknown>,
@@ -356,7 +451,7 @@ function validated(
 ): Item {
   try {
     const shared = {
-      id: validId(value.id),
+      id: identifier(value.id),
       createdAt: current?.createdAt || Date.now(),
       updatedAt: Date.now(),
       archived: value.archived === true,
@@ -385,7 +480,7 @@ function validated(
       const complete = value.state === "complete";
       return {
         ...shared,
-        destinationId: validId(value.destinationId),
+        destinationId: identifier(value.destinationId),
         destinationName: text(value.destinationName, 100, true),
         destinationUrl: safeUrl(value.destinationUrl),
         contentRef: text(value.contentRef || "", 200),
@@ -399,6 +494,7 @@ function validated(
             : Date.now()
           : null,
         verification: "user-reported",
+        ...sourceReference(value),
       };
     }
   } catch (err) {
@@ -414,7 +510,7 @@ const recordRoute = (remove = false) =>
     if (!["drafts", "destinations", "tasks"].includes(kind))
       throw new PublicError("Unknown record type.", 404);
     const request = input(body);
-    const id = validId(params.id);
+    const id = identifier(params.id);
     const saved = await workspace(user!.userId);
     if (request.revision !== saved.revision)
       throw new PublicError(
@@ -428,7 +524,7 @@ const recordRoute = (remove = false) =>
       : validated(kind, { ...request, id }, current);
     if (
       kind === "tasks" &&
-      !current &&
+      (!current || current.destinationId !== item.destinationId) &&
       !saved.destinations.some(
         (d) => d.id === item.destinationId && !d.archived && d.active !== false,
       )
@@ -514,7 +610,7 @@ export const handler = router({
       return json(
         {
           status: encryptionReady && databaseReady ? "ok" : "degraded",
-          version: "0.3.1",
+          version: "0.4.0",
           encryptionReady,
           databaseReady,
         },
@@ -543,11 +639,21 @@ export const handler = router({
       const [sync] = await db.get("sync_meta", [hash(user!.userId)], {
         consistent: true,
       });
+      let unreadable = false;
+      if (saved.ciphertext) {
+        try {
+          decrypt(saved as Envelope, await encryptionKey());
+        } catch {
+          unreadable = true;
+        }
+      }
       return json({
-        connected: Boolean(saved.ciphertext),
+        connected: Boolean(saved.ciphertext) && !unreadable,
         connectedAt: saved.ciphertext ? saved.connectedAt : null,
         expiresAt: saved.expiresAt || null,
-        reconnectRequired: Boolean(saved.reconnectRequired || saved.refreshId),
+        reconnectRequired: Boolean(
+          saved.reconnectRequired || saved.refreshId || unreadable,
+        ),
         sync: sync?.data || null,
         lastError: sync?.lastError || null,
       });
@@ -586,12 +692,17 @@ export const handler = router({
         throw new PublicError(
           "Buffer is not configured on this deployment yet. Open Settings for setup instructions.",
           503,
+          "BUFFER_CONFIGURATION",
         );
-      await cooldown(user!.userId, "oauth", 5000);
+      stage("oauth.configuration");
       await encryptionKey();
+      stage("oauth.rate_limit");
+      await cooldown(user!.userId, "oauth", 5000);
+      stage("oauth.connection.lookup");
       const saved = await connection(user!.userId);
       const verifier = nonce();
       const state = nonce();
+      stage("oauth.pending.persist");
       const [created] = await db.tx.update("oauth_pending_v2", [
         {
           id: hash(user!.userId),
@@ -610,6 +721,7 @@ export const handler = router({
           "Could not confirm authorization initialization.",
           503,
         );
+      stage("oauth.authorization_url");
       const query = new URLSearchParams({
         client_id: await secrets.readSecret("BUFFER_CLIENT_ID"),
         redirect_uri: CALLBACK,
@@ -651,6 +763,7 @@ export const handler = router({
   "POST /api/buffer/finish": [
     requireAuth(),
     secured(async ({ body, event, user }) => {
+      stage("oauth.callback.validation");
       const request = input(body);
       const state = typeof request.state === "string" ? request.state : "";
       const cookies = [
@@ -666,6 +779,7 @@ export const handler = router({
         throw new PublicError(
           "OAuth state did not match this browser. Start Connect Buffer again.",
           403,
+          "BUFFER_STATE_INVALID",
         );
       const id = hash(user!.userId);
       const [pending] = await db.get<Pending>("oauth_pending_v2", [id], {
@@ -682,7 +796,9 @@ export const handler = router({
         throw new PublicError(
           "Authorization is expired or already used. Start Connect Buffer again.",
           403,
+          "BUFFER_STATE_EXPIRED",
         );
+      stage("oauth.callback.claim");
       const [claimed] = await db.tx.update(
         "oauth_pending_v2",
         [
@@ -698,7 +814,12 @@ export const handler = router({
         ],
         { patch: true },
       );
-      if (!claimed) throw new PublicError("Authorization already used.", 403);
+      if (!claimed)
+        throw new PublicError(
+          "Authorization already used.",
+          403,
+          "BUFFER_STATE_REPLAYED",
+        );
       const saved = await connection(user!.userId);
       if (saved.version !== pending.version)
         throw new PublicError(
@@ -708,6 +829,8 @@ export const handler = router({
       if (request.error)
         throw new PublicError(
           "Buffer authorization was canceled. Your previous connection is preserved.",
+          400,
+          "BUFFER_AUTHORIZATION_DENIED",
         );
       if (
         typeof request.code !== "string" ||
@@ -716,25 +839,48 @@ export const handler = router({
       )
         throw new PublicError("Buffer returned no valid authorization code.");
       const key = await encryptionKey();
-      const response = await fetch("https://auth.buffer.com/token", {
-        method: "POST",
-        signal: AbortSignal.timeout(12000),
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          client_id: await secrets.readSecret("BUFFER_CLIENT_ID"),
-          client_secret: await secrets.readSecret("BUFFER_CLIENT_SECRET"),
-          grant_type: "authorization_code",
-          code: request.code,
-          redirect_uri: CALLBACK,
-          code_verifier: pending.verifier,
-        }),
-      });
+      stage("oauth.token.exchange");
+      let response: Response;
+      try {
+        response = await fetch("https://auth.buffer.com/token", {
+          method: "POST",
+          signal: AbortSignal.timeout(12000),
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            client_id: await secrets.readSecret("BUFFER_CLIENT_ID"),
+            client_secret: await secrets.readSecret("BUFFER_CLIENT_SECRET"),
+            grant_type: "authorization_code",
+            code: request.code,
+            redirect_uri: CALLBACK,
+            code_verifier: pending.verifier,
+          }),
+        });
+      } catch {
+        throw new PublicError(
+          "Buffer did not confirm the authorization exchange. Start Connect Buffer again.",
+          502,
+          "BUFFER_EXCHANGE_UNAVAILABLE",
+        );
+      }
       if (!response.ok)
         throw new PublicError(
-          "Buffer declined the exchange. Start Connect Buffer again.",
-          502,
+          response.status === 429
+            ? "Buffer is rate limiting authorization. Wait before reconnecting."
+            : "Buffer declined authorization. Confirm the app credentials and registered redirect URL, then reconnect.",
+          response.status === 429 ? 429 : 502,
+          "BUFFER_EXCHANGE_REJECTED",
         );
-      const token = parseToken(await response.json());
+      let token: TokenData;
+      try {
+        token = parseToken(await response.json());
+      } catch {
+        throw new PublicError(
+          "Buffer returned an incomplete token response. Reconnect Buffer.",
+          502,
+          "BUFFER_EXCHANGE_MALFORMED",
+        );
+      }
+      stage("oauth.connection.persist");
       await patchConnection(user!.userId, saved, {
         ...encrypt(token, key),
         connectedAt: Date.now(),
@@ -757,6 +903,7 @@ export const handler = router({
   "POST /api/buffer/sync": [
     requireAuth(),
     trackedSync(async ({ user, body }) => {
+      stage("buffer.sync");
       const request = input(body);
       const mode = String(request.mode || "channels");
       if (!["channels", "queue", "history"].includes(mode))
@@ -811,17 +958,20 @@ export const handler = router({
             ? "[scheduled, sending, needs_approval, draft]"
             : "[sent, error]";
         const direction = mode === "queue" ? "asc" : "desc";
-        const query = `query GhostPostPosts { posts(first: 30, after: ${after ? JSON.stringify(after) : "null"}, input: { organizationId: ${orgLiteral}, filter: { status: ${statuses} }, sort: [{ field: dueAt, direction: ${direction} }, { field: createdAt, direction: ${direction} }] }) { edges { node { id text channelId status dueAt sentAt createdAt externalLink assets { id mimeType } } } pageInfo { hasNextPage endCursor } } }`;
+        const query = `query GhostPostPosts { posts(first: 30, after: ${after ? JSON.stringify(after) : "null"}, input: { organizationId: ${orgLiteral}, filter: { status: ${statuses} }, sort: [{ field: dueAt, direction: ${direction} }, { field: createdAt, direction: ${direction} }] }) { edges { node { id text channelId status dueAt sentAt createdAt externalLink contentItemId ideaId assets { id mimeType source thumbnail } } } pageInfo { hasNextPage endCursor } } }`;
         const result = await graph<{ posts: Page }>(token, query);
         data = {
           posts: result.posts.edges.map((edge) => ({
             ...edge.node,
             text: edge.node.text.slice(0, 10000),
-            assets: edge.node.assets?.slice(0, 20) || [],
+            assets: normalizeAssets(edge.node.id, edge.node.assets),
           })),
           pageInfo: result.posts.pageInfo,
         };
       }
+      if (Array.isArray(data.posts))
+        for (const post of data.posts as Post[])
+          cacheMedia(user!.userId, post, token);
       const syncedAt = Date.now();
       await db.tx.update("sync_meta", [
         {
@@ -839,6 +989,56 @@ export const handler = router({
         organizationId: org.id,
         syncedAt,
       });
+    }),
+  ],
+  "POST /api/buffer/post": [
+    requireAuth(),
+    secured(async ({ user, body }) => {
+      const request = input(body);
+      await cooldown(user!.userId, "source_post", 1000);
+      return json({
+        post: await ownedPost(user!.userId, identifier(request.postId), true),
+      });
+    }),
+  ],
+  "GET /api/buffer/media/:postId/:assetKey": [
+    requireAuth(),
+    secured(async ({ user, params, query }) => {
+      const thumbnail = query.variant === "thumbnail";
+      await mediaAllowance(user!.userId, thumbnail);
+      const post = await ownedPost(user!.userId, identifier(params.postId));
+      const asset = post.assets?.find(
+        (item) => item.key === identifier(params.assetKey),
+      );
+      if (!asset)
+        throw new PublicError(
+          "The media on this post changed. Refresh the source post and select it again.",
+          410,
+          "BUFFER_MEDIA_UNAVAILABLE",
+        );
+      stage("buffer.media.download");
+      const media = await downloadMedia(
+        thumbnail ? asset.thumbnail : asset.source,
+        thumbnail,
+      );
+      return {
+        statusCode: 200,
+        headers: {
+          "Content-Type": media.contentType,
+          "Content-Disposition":
+            (thumbnail ? "inline" : "attachment") +
+            '; filename="GhostPost-' +
+            post.id +
+            "-" +
+            asset.key +
+            "." +
+            mediaExtension(media.contentType) +
+            '"',
+          "Cache-Control": "private, no-store",
+          "X-Content-Type-Options": "nosniff",
+        },
+        body: media.body,
+      };
     }),
   ],
   "POST /api/workspace/import": [

@@ -25,6 +25,7 @@ async function request(method: string, path: string, body?: unknown) {
     method,
     credentials: "same-origin",
     cache: "no-store",
+    signal: AbortSignal.timeout(55000),
     headers: body === undefined ? {} : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -32,7 +33,10 @@ async function request(method: string, path: string, body?: unknown) {
     .json()
     .catch(() => ({ error: "The server returned an unexpected response." }));
   if (!res.ok) {
-    const error = new Error(data.error || "Request failed.") as Error & {
+    const error = new Error(
+      (data.error || "Request failed.") +
+        (data.requestId ? " Reference: " + data.requestId : ""),
+    ) as Error & {
       response: unknown;
     };
     error.response = { data, status: res.status };

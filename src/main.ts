@@ -1,6 +1,20 @@
+import {
+  campaignGroups,
+  campaignKey,
+  campaignMinute,
+  postTime,
+} from "../shared/campaigns";
+import {
+  mediaPath,
+  mediaExtension,
+  type MediaAsset,
+  type SourceReference,
+} from "../shared/media";
+import { downloadAssets } from "./downloads";
+import { shareLaunch, variantFor } from "../shared/handoff";
 import { api, auth } from "./client";
 
-type Item = {
+type Item = SourceReference & {
   id: string;
   title?: string;
   text?: string;
@@ -50,7 +64,9 @@ type Post = {
   sentAt?: string;
   createdAt: string;
   externalLink?: string;
-  assets?: { mimeType: string }[];
+  contentItemId?: string | null;
+  ideaId?: string | null;
+  assets?: MediaAsset[];
 };
 type View = "today" | "queue" | "composer" | "history" | "settings";
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -104,137 +120,155 @@ let destinationEditor: Item = {
   active: true,
 };
 let prepare: Item | null = null;
+let taskSourcePost: Post | null = null;
 let toastTimer: ReturnType<typeof setTimeout>;
 let coachVisible = false;
 let batchPost: Post | null = null;
+let batchDirty = false;
 let batchSourceId = "";
 let expandedCampaigns = new Set<string>();
-function postTime(post:Post){return Date.parse(post.sentAt||post.dueAt||post.createdAt)||0;}
-function campaignMinute(post:Post) {
- // Prefer actual sentAt; scheduled items have dueAt. Never group solely by creation time.
- const timestamp=post.sentAt||post.dueAt;
- const ms=timestamp?Date.parse(timestamp):NaN;
- return Number.isFinite(ms)?Math.floor(ms/60000):null;
+const selectedCampaignVersion = new Map<string, string>();
+const mediaSelected = new Map<string, Set<string>>();
+function mediaPreview(post: Post) {
+  const assets = post.assets || [];
+  if (!assets.length)
+    return `<div class="campaign-media-empty"><small>No media returned for this platform version.</small></div>`;
+  const selected =
+    mediaSelected.get(post.id) || new Set(assets.map((a) => a.key));
+  return `<section class="media-gallery" aria-label="Media for this platform version"><div class="media-grid">${assets.map((asset, index) => `<figure class="media-attachment"><label class="check"><input type="checkbox" data-media-post="${escape(post.id)}" data-media-key="${escape(asset.key)}" ${selected.has(asset.key) ? "checked" : ""}>Attachment ${index + 1}</label>${asset.mimeType.startsWith("video/") ? `<video controls preload="none" ${asset.thumbnail ? `poster="${escape(mediaPath(post.id, asset.key, true))}"` : ""} src="${escape(mediaPath(post.id, asset.key))}" aria-label="Video attachment ${index + 1}"></video>` : asset.thumbnail || asset.mimeType.startsWith("image/") ? `<img loading="lazy" src="${escape(mediaPath(post.id, asset.key, Boolean(asset.thumbnail)))}" alt="Attachment ${index + 1} preview" data-media-preview>` : "<p>Preview unavailable</p>"}<figcaption>${escape(asset.mimeType)}<div class="actions">${button("Download", "download-asset", `data-id="${escape(post.id)}" data-key="${escape(asset.key)}"`, "subtle")}${link(asset.source, "Open source")}</div></figcaption></figure>`).join("")}</div><div class="actions">${button("Download selected media", "download-selected", `data-id="${escape(post.id)}"`, "subtle")}${button("Refresh source media", "refresh-source", `data-id="${escape(post.id)}"`, "text-button")}</div><small>Downloads use media returned by Buffer. Expired files or source pages may require opening the source link. Up to 50 MB per file or ZIP; downloads do not upload or publish anything.</small></section>`;
 }
-function campaignGroups(posts:Post[]) {
- const byMinute=new Map<number,Post[]>();
- const singles:Post[][]=[];
- for(const post of posts) {
-  const minute=campaignMinute(post);
-  if(minute===null){singles.push([post]);continue;}
-  const bucket=byMinute.get(minute)||[];
-  bucket.push(post);
-  byMinute.set(minute,bucket);
- }
- const groups:Post[][]=[...singles];
- for(const bucket of byMinute.values()){
-  // Same minute and distinct channels is the strong campaign signal.
-  // Avoid merging two posts from the same channel into one group.
-  const pending=[...bucket];
-  while(pending.length){
-   const channelsSeen=new Set<string>();
-   const group:Post[]=[];
-   for(let i=0;i<pending.length;){
-    const p=pending[i];
-    if(!channelsSeen.has(p.channelId)){
-     channelsSeen.add(p.channelId);group.push(p);pending.splice(i,1);
-    }else i++;
-   }
-   groups.push(group);
-  }
- }
- return groups.sort((a,b)=>postTime(a[0])-postTime(b[0]));
+function visibleGroups() {
+  return campaignGroups(filtered(view === "history" ? history : queue));
 }
-const selectedCampaignVersion=new Map<string,string>();
-function mediaPreview(post:Post){
- const assets=post.assets||[];
- if(!assets.length)return `<div class="campaign-media-empty"><span>✧</span><small>No media returned for this version</small></div>`;
- return `<div class="campaign-media" aria-label="${assets.length} media attachments">${assets.slice(0,5).map((asset,index)=>{
-  const mime=asset.mimeType||"Media";
-  // Buffer currently returns asset IDs and MIME types, not usable image URLs.
-  // Never fabricate thumbnails or expose media URLs without verification.
-  const label=mime.startsWith("video/")?"▶":mime.startsWith("image/")?"▧":"◇";
-  return `<span class="media-tile" title="${escape(mime)}" aria-label="${escape(mime)} attachment ${index+1}">${label}<small>${escape(mime.split("/")[1]||"media")}</small></span>`;
- }).join("")}${assets.length>5?`<span class="media-more">+${assets.length-5}</span>`:""}</div>`;
+function groupKey(group: Post[]) {
+  return organizationId + ":" + campaignKey(group);
 }
-function campaignCard(group:Post[]) {
- if(group.length===1)return postCard(group[0]);
- const key=group[0].id;
- const chosen=group.find(p=>p.id===selectedCampaignVersion.get(key))||group[0];
- const index=group.findIndex(p=>p.id===chosen.id);
- const channel=channels.find(c=>c.id===chosen.channelId);
- const minute=campaignMinute(chosen);
- const time=minute===null?"":new Date(minute*60000).toLocaleString([],{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
- return `<article class="post-card campaign-card" aria-label="Grouped Buffer campaign with ${group.length} channel versions">
+function campaignCard(group: Post[]) {
+  if (group.length === 1) return postCard(group[0]);
+  const key = groupKey(group);
+  const chosen =
+    group.find((p) => p.id === selectedCampaignVersion.get(key)) || group[0];
+  const index = group.findIndex((p) => p.id === chosen.id);
+  const channel = channels.find((c) => c.id === chosen.channelId);
+  const minute = campaignMinute(chosen);
+  const time =
+    minute === null
+      ? ""
+      : new Date(minute * 60000).toLocaleString([], {
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+        });
+  return `<article class="post-card campaign-card" aria-label="Grouped Buffer campaign with ${group.length} channel versions">
  <div class="campaign-head"><span class="campaign-ghost">${ghost}</span><div><span class="section-label">✕ CAMPAIGN RADAR</span><h3>One moment. ${group.length} voices.</h3><small>${escape(time)} · matching Buffer publish minute</small></div><span class="campaign-count">${group.length}×</span></div>
- <div class="campaign-tabs" role="group" aria-label="Choose the source platform version">${group.map((p,i)=>{
-  const c=channels.find(x=>x.id===p.channelId);
-  return button(`${escape(c?.service||"Channel")} <small>${escape(c?.name||"")}</small>`,"campaign-select",`data-id="${escape(key)}" data-version="${escape(p.id)}" aria-pressed="${p.id===chosen.id}" title="Show ${escape(c?.name||c?.service||"channel")} version"`,p.id===chosen.id?"campaign-tab active":"campaign-tab");
- }).join("")}</div>
- <div class="campaign-copy" aria-live="polite"><div class="campaign-copy-head"><strong>${escape(channel?.name||channel?.service||"Buffer version")}</strong><span>${index+1} / ${group.length}</span></div><p class="post-text">${escape(chosen.text||"Media-only post")}</p>${mediaPreview(chosen)}</div>
- <div class="campaign-actions"><span class="hint">Select a platform to inspect its exact copy and media metadata. Equal publish minutes are a strong grouping signal, not an API-confirmed campaign ID.</span><div class="actions">${button("← Previous","campaign-prev",`data-id="${escape(key)}"`,"subtle")}${button("Next version →","campaign-next",`data-id="${escape(key)}"`,"subtle")}${button("✕ Prepare this version","batch-post",`data-id="${escape(chosen.id)}"`,"primary")}</div></div>
+ <div class="campaign-tabs" role="group" aria-label="Choose the source platform version">${group
+   .map((p, i) => {
+     const c = channels.find((x) => x.id === p.channelId);
+     return button(
+       `${escape(c?.service || "Channel")} <small>${escape(c?.name || "")}</small>`,
+       "campaign-select",
+       `data-id="${escape(key)}" data-version="${escape(p.id)}" aria-pressed="${p.id === chosen.id}" title="Show ${escape(c?.name || c?.service || "channel")} version"`,
+       p.id === chosen.id ? "campaign-tab active" : "campaign-tab",
+     );
+   })
+   .join("")}</div>
+ <div class="campaign-copy" aria-live="polite"><div class="campaign-copy-head"><strong>${escape(channel?.name || channel?.service || "Buffer version")}</strong><span>${index + 1} / ${group.length}</span></div><p class="post-text">${escape(chosen.text || "Media-only post")}</p>${mediaPreview(chosen)}</div>
+ <div class="campaign-actions"><span class="hint">Select a platform to inspect its exact caption and attached media. Equal publish minutes are a strong grouping signal, not an API-confirmed campaign ID.</span><div class="actions">${button("Download campaign media", "download-campaign", `data-id="${escape(key)}"`, "subtle")}${button("← Previous", "campaign-prev", `data-id="${escape(key)}"`, "subtle")}${button("Next version →", "campaign-next", `data-id="${escape(key)}"`, "subtle")}${button("✕ Prepare this version", "batch-post", `data-id="${escape(chosen.id)}"`, "primary")}</div></div>
  </article>`;
 }
-function nextCampaignPost(){
- const groups=campaignGroups(queue.filter(p=>p.text.trim()));
- return groups.sort((a,b)=>postTime(a[0])-postTime(b[0]))[0]?.[0]||null;
+function nextCampaignPost() {
+  const groups = campaignGroups(queue.filter((p) => p.text.trim()));
+  return groups.sort((a, b) => postTime(a[0]) - postTime(b[0]))[0]?.[0] || null;
 }
 let batchSelected: string[] = [];
-let batchText: Record<string,string> = {};
-function variantFor(source:string,destination:Item) {
- const platform=(destination.platform||"").toLowerCase();
- const clean=source.trim();
- if(platform.includes("reddit"))return clean.replace(/#[a-zA-Z0-9_]+/g,"").replace(/\n{3,}/g,"\n\n").trim();
- if(platform.includes("bluesky")||platform.includes("threads"))return clean.length>280?clean.slice(0,277).trimEnd()+"…":clean;
- return clean;
+let batchText: Record<string, string> = {};
+function startBatch(post: Post) {
+  batchPost = post;
+  batchDirty = false;
+  batchSourceId = post.id;
+  const dest = active(ws.destinations).filter(
+    (d) => d.active !== false && url(d.url),
+  );
+  batchSelected = dest.map((d) => d.id);
+  batchText = Object.fromEntries(
+    dest.map((d) => [d.id, variantFor(post.text, d)]),
+  );
+  coachVisible = false;
+  render();
 }
-type ShareLaunch = { url:string; prefilled:boolean; explanation:string };
-function shareLaunch(destination:Item,caption:string):ShareLaunch {
- const target=url(destination.url);
- const platform=(destination.platform||"").toLowerCase();
- const text=caption.trim();
- const u=new URL(target);
- const host=u.hostname.toLowerCase();
- if((platform.includes("reddit")||host.endsWith("reddit.com"))&&host.endsWith("reddit.com")) {
-  const title=text.split("\n").find(Boolean)?.slice(0,300)||"New post";
-  const path=u.pathname.match(/^\/r\/([A-Za-z0-9_]+)(?:\/|$)/);
-  const params=new URLSearchParams({selftext:text,title});
-  if(path)params.set("sr",path[1]);
-  return {url:"https://www.reddit.com/submit?"+params,prefilled:true,explanation:"Reddit submit intent: title and text."};
- }
- if((platform.includes("bluesky")||host==="bsky.app")&&host==="bsky.app")
-  return {url:"https://bsky.app/intent/compose?"+new URLSearchParams({text}),prefilled:true,explanation:"Bluesky compose intent."};
- if((platform==="x"||platform==="twitter"||host==="x.com"||host==="twitter.com")&&(host==="x.com"||host==="twitter.com"))
-  return {url:"https://twitter.com/intent/tweet?"+new URLSearchParams({text}),prefilled:true,explanation:"X/Twitter compose intent."};
- return {url:target,prefilled:false,explanation:"No verified text-prefill URL. Use system Share or copy the caption."};
+function batchPanel() {
+  if (!batchPost) return "";
+  const dest = active(ws.destinations).filter(
+    (d) => d.active !== false && url(d.url),
+  );
+  return `<dialog id="batch-dialog" aria-labelledby="batch-title"><div class="section-row"><div><span class="section-label">✕ SPECTRAL WORKFLOW</span><h2 id="batch-title">One post. Many destinations.</h2></div>${button("Close", "batch-close", 'aria-label="Close batch workflow"', "subtle")}</div><p class="hint">The selected platform version supplies this caption and media. Edit each destination version. No automatic publishing. Download the media, then attach it yourself at the destination.</p>${message ? `<div class="notice" role="alert">${escape(message)}</div>` : ""}<div class="batch-source"><small>BUFFER SOURCE · ${escape(batchPost.status)}</small><p>${escape(batchPost.text.slice(0, 450))}</p>${mediaPreview(batchPost)}</div>${dest.length ? dest.map((d) => `<div class="batch-destination"><label class="check"><input type="checkbox" data-batch-select="${escape(d.id)}" ${batchSelected.includes(d.id) ? "checked" : ""}><strong>${escape(d.name)}</strong>${badge(d.platform || "Custom")}</label><textarea data-batch-copy="${escape(d.id)}" aria-label="Adapted copy for ${escape(d.name)}" rows="4" maxlength="10000">${escape(batchText[d.id] || "")}</textarea><small>${escape(d.instructions || "Check this destination's current posting rules.")}</small><div class="actions">${button("Copy caption", "batch-copy", `data-id="${escape(d.id)}"`, "subtle")}${button(shareLaunch(d, batchText[d.id] || "").prefilled ? "Open prefilled composer ↗" : "Open posting page ↗", "batch-open", `data-id="${escape(d.id)}"`, "subtle")}${button("Share caption ↗", "batch-share", `data-id="${escape(d.id)}"`, "text-button")}</div></div>`).join("") : `<div class="empty"><h3>No destinations yet</h3><p>Add your Reddit community, personal profile, or custom posting URL in Settings.</p>${button("Add destination", "batch-settings", "", "primary")}</div>`}<div class="actions">${button("Open selected pages ↗", "batch-open-all", !dest.length ? "disabled" : "", "subtle")}${button("Save selected manual tasks", "batch-save", !dest.length || busy ? "disabled" : "", "primary")}</div><p class="hint">Supported compose intents pass text to the platform. Other sites may need manual paste. System Share can hand content to an installed app when supported. Review before publishing.</p></dialog>`;
 }
-function startBatch(post:Post) {
- batchPost=post;
- batchSourceId=post.id;
- const dest=active(ws.destinations).filter(d=>d.active!==false&&url(d.url));
- batchSelected=dest.map(d=>d.id);
- batchText=Object.fromEntries(dest.map(d=>[d.id,variantFor(post.text,d)]));
- coachVisible=false;
- render();
+const guide: Record<View, { title: string; detail: string; steps: string[] }> =
+  {
+    today: {
+      title: "Welcome to Mission Control",
+      detail:
+        "Your private bridge from Buffer to the places you publish by hand.",
+      steps: [
+        "Connect Buffer and refresh your channels.",
+        "Use Next post to prepare manual cross-posts.",
+        "Track what you published yourself.",
+      ],
+    },
+    queue: {
+      title: "On the radar",
+      detail:
+        "These are real records returned by Buffer, not simulated publishing.",
+      steps: [
+        "Refresh your scheduled queue.",
+        "Filter by date or channel.",
+        "Prepare any post for a manual destination.",
+      ],
+    },
+    composer: {
+      title: "Create in your own space",
+      detail: "GhostPost drafts stay private and separate from Buffer.",
+      steps: [
+        "Write and save a draft.",
+        "Adapt the draft for a destination.",
+        "Copy and publish manually.",
+      ],
+    },
+    history: {
+      title: "Every signal has a story",
+      detail:
+        "Buffer activity and your manual completion reports are clearly separated.",
+      steps: [
+        "Refresh published history.",
+        "Review manual tasks.",
+        "Mark completion only after publishing yourself.",
+      ],
+    },
+    settings: {
+      title: "Connect your orbit",
+      detail: "Configure Buffer and your favorite manual destinations.",
+      steps: [
+        "Connect your own Buffer account.",
+        "Add HTTPS posting URLs for each destination.",
+        "Review exports, privacy and connection health.",
+      ],
+    },
+  };
+function coachKey() {
+  return "ghostpost-tour-v1:" + (user?.userId || "guest") + ":" + view;
 }
-function batchPanel(){
- if(!batchPost)return "";
- const dest=active(ws.destinations).filter(d=>d.active!==false&&url(d.url));
- return `<dialog id="batch-dialog" aria-labelledby="batch-title"><div class="section-row"><div><span class="section-label">✕ SPECTRAL WORKFLOW</span><h2 id="batch-title">One post. Many destinations.</h2></div>${button("Close","batch-close",'aria-label="Close batch workflow"',"subtle")}</div><p class="hint">One representative Buffer post is used for this workflow. Edit each destination version. No automatic publishing.</p><div class="batch-source"><small>BUFFER SOURCE · ${escape(batchPost.status)}</small><p>${escape(batchPost.text.slice(0,450))}</p></div>${dest.length?dest.map(d=>`<div class="batch-destination"><label class="check"><input type="checkbox" data-batch-select="${escape(d.id)}" ${batchSelected.includes(d.id)?"checked":""}><strong>${escape(d.name)}</strong>${badge(d.platform||"Custom")}</label><textarea data-batch-copy="${escape(d.id)}" aria-label="Adapted copy for ${escape(d.name)}" rows="4" maxlength="10000">${escape(batchText[d.id]||"")}</textarea><small>${escape(d.instructions||"Check this destination's current posting rules.")}</small><div class="actions">${button("Copy caption","batch-copy",`data-id="${escape(d.id)}"`,"subtle")}${button(shareLaunch(d,batchText[d.id]||"").prefilled?"Open prefilled composer ↗":"Open posting page ↗","batch-open",`data-id="${escape(d.id)}"`,"subtle")}${button("System Share ↗","batch-share",`data-id="${escape(d.id)}"`,"text-button")}</div></div>`).join(""):`<div class="empty"><h3>No destinations yet</h3><p>Add your Reddit community, personal profile, or custom posting URL in Settings.</p>${button("Add destination","batch-settings","","primary")}</div>`}<div class="actions">${button("Open selected pages ↗","batch-open-all",!dest.length?"disabled":"","subtle")}${button("Save selected manual tasks","batch-save",!dest.length||busy?"disabled":"","primary")}</div><p class="hint">Supported compose intents pass text to the platform. Other sites may need manual paste. System Share can hand content to an installed app when supported. Review before publishing.</p></dialog>`;
+function showCoach(force = false) {
+  try {
+    coachVisible = force || localStorage.getItem(coachKey()) !== "seen";
+  } catch {
+    coachVisible = force;
+  }
 }
-const guide: Record<View, { title:string; detail:string; steps:string[] }> = {
- today:{title:"Welcome to Mission Control",detail:"Your private bridge from Buffer to the places you publish by hand.",steps:["Connect Buffer and refresh your channels.","Use Next post to prepare manual cross-posts.","Track what you published yourself."]},
- queue:{title:"On the radar",detail:"These are real records returned by Buffer, not simulated publishing.",steps:["Refresh your scheduled queue.","Filter by date or channel.","Prepare any post for a manual destination."]},
- composer:{title:"Create in your own space",detail:"GhostPost drafts stay private and separate from Buffer.",steps:["Write and save a draft.","Adapt the draft for a destination.","Copy and publish manually."]},
- history:{title:"Every signal has a story",detail:"Buffer activity and your manual completion reports are clearly separated.",steps:["Refresh published history.","Review manual tasks.","Mark completion only after publishing yourself."]},
- settings:{title:"Connect your orbit",detail:"Configure Buffer and your favorite manual destinations.",steps:["Connect your own Buffer account.","Add HTTPS posting URLs for each destination.","Review exports, privacy and connection health."]}
-};
-function coachKey(){return "ghostpost-tour-v1:"+(user?.userId||"guest")+":"+view;}
-function showCoach(force=false){coachVisible=force||localStorage.getItem(coachKey())!=="seen";}
-function coachPanel(){
- if(!coachVisible||prepare)return "";
- const g=guide[view];
- return `<section class="coach-card" role="dialog" aria-modal="false" aria-label="Page guide"><div class="coach-top"><span class="section-label">✦ FIRST LOOK · GHOSTPOST GUIDE</span>${button("✕","coach-dismiss",'aria-label="Dismiss guide"',"text-button")}</div><h2>${escape(g.title)}</h2><p>${escape(g.detail)}</p><ol>${g.steps.map(x=>`<li>${escape(x)}</li>`).join("")}</ol><div class="actions">${button("Got it ✓","coach-dismiss","","primary")}</div></section>`;
+function coachPanel() {
+  if (!coachVisible || prepare) return "";
+  const g = guide[view];
+  return `<section class="coach-card" role="dialog" aria-modal="false" aria-label="Page guide"><div class="coach-top"><span class="section-label">✦ FIRST LOOK · GHOSTPOST GUIDE</span>${button("✕", "coach-dismiss", 'aria-label="Dismiss guide"', "text-button")}</div><h2>${escape(g.title)}</h2><p>${escape(g.detail)}</p><ol>${g.steps.map((x) => `<li>${escape(x)}</li>`).join("")}</ol><div class="actions">${button("Got it ✓", "coach-dismiss", "", "primary")}</div></section>`;
 }
 const escape = (value: unknown) =>
   String(value ?? "").replace(
@@ -292,12 +326,16 @@ function toast(text: string) {
 function errorMessage(error: unknown) {
   const data = (
     error as {
-      response?: { data?: { error?: string; message?: string } };
+      response?: {
+        data?: { error?: string; message?: string; requestId?: string };
+      };
       data?: { error?: string };
     }
   )?.response?.data;
   return (
-    data?.error ||
+    (data?.error
+      ? data.error + (data.requestId ? " Reference: " + data.requestId : "")
+      : undefined) ||
     data?.message ||
     (error as { data?: { error?: string } })?.data?.error ||
     (error instanceof Error
@@ -374,7 +412,7 @@ function filtered(posts: Post[]) {
 }
 function postCard(post: Post) {
   const channel = channels.find((item) => item.id === post.channelId);
-  return `<article class="post-card"><div class="post-top"><div class="avatar">${escape(channel?.service?.slice(0, 2).toUpperCase() || "B")}</div><div><strong>${escape(channel?.name || post.channelId)}</strong><small>${escape(channel?.service || "Buffer")} · ${escape(date(post.sentAt || post.dueAt || post.createdAt))}</small></div>${badge(post.status, post.status === "error" ? "bad" : post.status === "sent" ? "good" : "")}</div><p class="post-text">${escape(post.text || "Media-only post")}</p>${post.assets?.length ? `<p class="hint">${post.assets.length} media attachment(s) · ${escape([...new Set(post.assets.map((a) => a.mimeType))].join(", "))}</p>` : ""}<div class="actions">${button("✕ Adapt for destinations", "batch-post", `data-id="${escape(post.id)}"`, "primary")}${button("Single destination", "prepare-post", `data-id="${escape(post.id)}"`, "subtle")}${button("Copy text", "copy-post", `data-id="${escape(post.id)}"`, "text-button")}${link(post.externalLink, "View post")}</div></article>`;
+  return `<article class="post-card"><div class="post-top"><div class="avatar">${escape(channel?.service?.slice(0, 2).toUpperCase() || "B")}</div><div><strong>${escape(channel?.name || post.channelId)}</strong><small>${escape(channel?.service || "Buffer")} · ${escape(date(post.sentAt || post.dueAt || post.createdAt))}</small></div>${badge(post.status, post.status === "error" ? "bad" : post.status === "sent" ? "good" : "")}</div><p class="post-text">${escape(post.text || "Media-only post")}</p>${mediaPreview(post)}<div class="actions">${button("✕ Adapt for destinations", "batch-post", `data-id="${escape(post.id)}"`, "primary")}${button("Single destination", "prepare-post", `data-id="${escape(post.id)}"`, "subtle")}${button("Copy text", "copy-post", `data-id="${escape(post.id)}"`, "text-button")}${link(post.externalLink, "View post")}</div></article>`;
 }
 function taskCard(task: Item) {
   return `<article class="task-card"><div class="section-row"><strong>${escape(task.destinationName)}</strong>${badge(task.state === "complete" ? "User-reported complete" : "Manual · pending", task.state === "complete" ? "good" : "")}</div><p>${escape(task.text?.slice(0, 180))}</p><small>${task.completedAt ? escape(date(task.completedAt)) : "Open the destination, publish manually, then confirm completion."}</small><div class="actions">${button("Open task", "open-task", `data-id="${escape(task.id)}"`, "subtle")}${button("Archive", "archive", `data-kind="tasks" data-id="${escape(task.id)}"`, "text-button")}</div></article>`;
@@ -414,7 +452,7 @@ function todayView() {
 }
 function queueView() {
   const posts = filtered(queue);
-  const groups=campaignGroups(posts);
+  const groups = campaignGroups(posts);
   return `<div class="view-title"><div class="section-label">KNOW WHAT’S COMING</div><h1>Your queue<span class="pink">.</span></h1><p>Scheduled, in-flight, approval and draft records from Buffer. Posts sharing the exact publish minute across different channels appear together. Select a channel tab to switch versions.</p></div>${filters()}<div class="actions">${button(busy ? "Refreshing…" : "Refresh queue", "sync-queue", busy || !linked ? "disabled" : "", "subtle")}</div>${posts.length ? groups.map(campaignCard).join("") : noData("No queue records to show", queueLoaded ? "Nothing matches these filters in the loaded pages." : "Connect Buffer and refresh the queue to load available posts.")}${queueCursor ? button("Load more queue records", "more-queue", busy ? "disabled" : "", "subtle wide") : ""}`;
 }
 function field(
@@ -427,7 +465,7 @@ function field(
   return `<label>${label}<input type="${type}" name="${name}" value="${escape(value)}" ${extra}></label>`;
 }
 function composerView() {
-  return `<div class="view-title"><div class="section-label">THOUGHT → DRAFT → DESTINATION</div><h1>Your drafts<span class="cyan">.</span></h1><p>Save a GhostPost draft, then adapt it for a manual destination.</p></div><form id="composer-form" class="panel"><div class="section-row"><h2>${editor.id ? "Edit draft" : "New draft"}</h2>${badge(dirty ? "Unsaved changes" : editor.id ? "Saved draft" : "Draft-first")}</div>${field("Draft title", "title", editor.title, 'required maxlength="120"')}<label>Content<textarea name="text" rows="8" required maxlength="10000" placeholder="What do you want to put out into the world?">${escape(editor.text)}</textarea></label><div class="section-row"><small id="char-count">${editor.text?.length || 0} / 10,000 characters</small><small>${user ? 'Private draft · not published' : 'Sign in to save this draft'}</small></div><details class="draft-options"><summary>Platform, campaign & reminder</summary><div class="form-grid"><label>Platform<select name="platform">${["general", "linkedin", "facebook", "reddit", "instagram", "threads", "bluesky", "twitter", "other"].map((p) => `<option ${editor.platform === p ? "selected" : ""}>${p}</option>`).join("")}</select></label>${field("Campaign / tags", "campaign", editor.campaign, 'maxlength="80"')}${field("Planning date (reminder only)", "plannedAt", localInput(editor.plannedAt), "", "datetime-local")}</div><p class="hint">Planning dates do not schedule publishing. Platform limits and media requirements must be checked at the destination.</p></details><div class="actions"><button class="primary" ${!user || busy ? "disabled" : ""}>${busy ? "Saving…" : "Save draft"}</button>${button("Copy text", "copy-editor", "", "subtle")}${button("New draft", "new", "", "text-button")}</div>${!user ? '<p class="hint">Sign in to save account-owned drafts.</p>' : ""}</form><details class="panel preview"><summary>Preview your draft</summary><p id="content-preview" class="post-text">${escape(editor.text || "Your words will appear here.")}</p></details><div class="section-row"><h2>Draft library</h2>${badge(active(ws.drafts).length + " drafts")}</div><label><span class="sr-only">Search drafts</span><input id="draft-search" type="search" placeholder="Search drafts by title, text or campaign…" value="${escape(search)}"></label>${
+  return `<div class="view-title"><div class="section-label">THOUGHT → DRAFT → DESTINATION</div><h1>Your drafts<span class="cyan">.</span></h1><p>Save a GhostPost draft, then adapt it for a manual destination.</p></div><form id="composer-form" class="panel"><div class="section-row"><h2>${editor.id ? "Edit draft" : "New draft"}</h2>${badge(dirty ? "Unsaved changes" : editor.id ? "Saved draft" : "Draft-first")}</div>${field("Draft title", "title", editor.title, 'required maxlength="120"')}<label>Content<textarea name="text" rows="8" required maxlength="10000" placeholder="What do you want to put out into the world?">${escape(editor.text)}</textarea></label><div class="section-row"><small id="char-count">${editor.text?.length || 0} / 10,000 characters</small><small>${user ? "Private draft · not published" : "Sign in to save this draft"}</small></div><details class="draft-options"><summary>Platform, campaign & reminder</summary><div class="form-grid"><label>Platform<select name="platform">${["general", "linkedin", "facebook", "reddit", "instagram", "threads", "bluesky", "twitter", "other"].map((p) => `<option ${editor.platform === p ? "selected" : ""}>${p}</option>`).join("")}</select></label>${field("Campaign / tags", "campaign", editor.campaign, 'maxlength="80"')}${field("Planning date (reminder only)", "plannedAt", localInput(editor.plannedAt), "", "datetime-local")}</div><p class="hint">Planning dates do not schedule publishing. Platform limits and media requirements must be checked at the destination.</p></details><div class="actions"><button class="primary" ${!user || busy ? "disabled" : ""}>${busy ? "Saving…" : "Save draft"}</button>${button("Copy text", "copy-editor", "", "subtle")}${button("New draft", "new", "", "text-button")}</div>${!user ? '<p class="hint">Sign in to save account-owned drafts.</p>' : ""}</form><details class="panel preview"><summary>Preview your draft</summary><p id="content-preview" class="post-text">${escape(editor.text || "Your words will appear here.")}</p></details><div class="section-row"><h2>Draft library</h2>${badge(active(ws.drafts).length + " drafts")}</div><label><span class="sr-only">Search drafts</span><input id="draft-search" type="search" placeholder="Search drafts by title, text or campaign…" value="${escape(search)}"></label>${
     active(ws.drafts)
       .filter((d) =>
         [d.title, d.text, d.campaign]
@@ -449,7 +487,9 @@ function composerView() {
 }
 function historyView() {
   const posts = filtered(history);
-  const groups=campaignGroups(posts);
+  const groups = campaignGroups(posts).sort(
+    (a, b) => postTime(b[0]) - postTime(a[0]),
+  );
   return `<div class="view-title"><div class="section-label">A RECORD OF THE WORK</div><h1>Publishing history<span class="pink">.</span></h1><p>API-reported Buffer activity and your own manual completion records.</p></div>${filters()}<div class="actions">${button("Refresh history", "sync-history", busy || !linked ? "disabled" : "", "subtle")}</div>${posts.length ? groups.map(campaignCard).join("") : noData("No Buffer history loaded", historyLoaded ? "No records match your current filters." : "Refresh history to retrieve published and failed posts.")}${historyCursor ? button("Load more history", "more-history", busy ? "disabled" : "", "subtle wide") : ""}<div class="section-row"><h2>Manual posting log</h2><small>User-reported, never API-verified</small></div>${
     active(ws.tasks)
       .filter(
@@ -476,7 +516,7 @@ function settingsView() {
     (kind) =>
       ws[kind].filter((item) => item.archived).map((item) => ({ kind, item })),
   );
-  return `<div class="view-title"><div class="section-label">YOUR WORKSPACE, YOUR RULES</div><h1>Settings<span class="cyan">.</span></h1></div><section class="panel"><div class="section-row"><h2>Buffer connection</h2>${badge(linked ? (reconnect ? "Reconnect needed" : "Linked") : "Not linked", linked && !reconnect ? "good" : "")}</div><p>${escape(user?.email || user?.name || "Sign in to use a private GhostPost workspace.")}</p><small>Connected: ${connectedAt ? escape(date(connectedAt)) : 'Not connected'}</small>${accountId ? `<p class="hint">Buffer account: ${escape(accountId)}</p>` : ""}${readonlyNote}${!configured ? bufferSetup() : ""}<div class="actions">${configured ? button(linked ? "Reconnect Buffer" : "Connect Buffer", "connect", busy ? "disabled" : "", "primary") : button("Check setup again", "check-setup", busy ? "disabled" : "", "subtle")}${button("Refresh channels", "sync", busy || !linked ? "disabled" : "", "subtle")}${linked ? button("Disconnect", "disconnect", busy ? "disabled" : "", "danger-button") : ""}${user ? button("Sign out", "signout", "", "text-button") : ""}</div>${organizations.length > 1 ? `<label>Buffer organization<select id="org">${organizations.map((org) => `<option value="${escape(org.id)}" ${org.id === organizationId ? "selected" : ""}>${escape(org.name)}</option>`).join("")}</select></label>` : ""}<p class="hint">Last successful sync: ${lastSync ? escape(date(lastSync)) : 'Not synced yet'}. ${escape(syncError)}</p></section><section class="panel"><h2>Channels</h2>${channels.length ? channels.map((ch) => `<div class="channel"><span class="avatar">${url(ch.avatar) ? `<img src="${escape(url(ch.avatar))}" alt="" referrerpolicy="no-referrer" loading="lazy">` : escape(ch.service.slice(0, 2).toUpperCase())}</span><div><strong>${escape(ch.name)}</strong><small>${escape(ch.service)} · ${escape(ch.timezone)}</small></div>${badge(ch.isDisconnected ? "Disconnected" : ch.isLocked ? "Locked" : ch.isQueuePaused ? "Queue paused" : "Connected", ch.isDisconnected || ch.isLocked ? "bad" : "good")}<small>${ch.canScheduleInBuffer ? "Scheduling allowed in Buffer" : "Scheduling unavailable"}</small></div>`).join("") : '<p class="quiet">No channels loaded. Refresh after connecting Buffer.</p>'}</section><section class="panel"><h2>Manual destinations</h2><p>Reddit, personal profiles, communities, or any HTTPS destination. GhostPost never logs in to these sites for you.</p>${active(
+  return `<div class="view-title"><div class="section-label">YOUR WORKSPACE, YOUR RULES</div><h1>Settings<span class="cyan">.</span></h1></div><section class="panel"><div class="section-row"><h2>Buffer connection</h2>${badge(linked ? (reconnect ? "Reconnect needed" : "Linked") : "Not linked", linked && !reconnect ? "good" : "")}</div><p>${escape(user?.email || user?.name || "Sign in to use a private GhostPost workspace.")}</p><small>Connected: ${connectedAt ? escape(date(connectedAt)) : "Not connected"}</small>${accountId ? `<p class="hint">Buffer account: ${escape(accountId)}</p>` : ""}${readonlyNote}${!configured ? bufferSetup() : ""}<div class="actions">${configured ? button(linked ? "Reconnect Buffer" : "Connect Buffer", "connect", busy ? "disabled" : "", "primary") : button("Check setup again", "check-setup", busy ? "disabled" : "", "subtle")}${button("Refresh channels", "sync", busy || !linked ? "disabled" : "", "subtle")}${linked ? button("Disconnect", "disconnect", busy ? "disabled" : "", "danger-button") : ""}${user ? button("Sign out", "signout", "", "text-button") : ""}</div>${organizations.length > 1 ? `<label>Buffer organization<select id="org">${organizations.map((org) => `<option value="${escape(org.id)}" ${org.id === organizationId ? "selected" : ""}>${escape(org.name)}</option>`).join("")}</select></label>` : ""}<p class="hint">Last successful sync: ${lastSync ? escape(date(lastSync)) : "Not synced yet"}. ${escape(syncError)}</p></section><section class="panel"><h2>Channels</h2>${channels.length ? channels.map((ch) => `<div class="channel"><span class="avatar">${url(ch.avatar) ? `<img src="${escape(url(ch.avatar))}" alt="" referrerpolicy="no-referrer" loading="lazy">` : escape(ch.service.slice(0, 2).toUpperCase())}</span><div><strong>${escape(ch.name)}</strong><small>${escape(ch.service)} · ${escape(ch.timezone)}</small></div>${badge(ch.isDisconnected ? "Disconnected" : ch.isLocked ? "Locked" : ch.isQueuePaused ? "Queue paused" : "Connected", ch.isDisconnected || ch.isLocked ? "bad" : "good")}<small>${ch.canScheduleInBuffer ? "Scheduling allowed in Buffer" : "Scheduling unavailable"}</small></div>`).join("") : '<p class="quiet">No channels loaded. Refresh after connecting Buffer.</p>'}</section><section class="panel"><h2>Manual destinations</h2><p>Reddit, personal profiles, communities, or any HTTPS destination. GhostPost never logs in to these sites for you.</p>${active(
     ws.destinations,
   )
     .map(
@@ -490,10 +530,11 @@ function settingsView() {
 function preparePanel() {
   if (!prepare) return "";
   const dest = ws.destinations.find((d) => d.id === prepare!.destinationId);
-  return `<dialog open id="manual-dialog" aria-labelledby="manual-title"><div class="section-row"><div><span class="section-label">THE HUMAN LAST MILE</span><h2 id="manual-title">Prepare a cross-post</h2></div>${button("Close", "close-prepare", 'aria-label="Close manual cross-post"', "subtle")}</div><p class="hint">1. Review → 2. Copy → 3. Open destination → 4. Publish manually → 5. Return and mark complete.</p>${message ? `<div class="notice" role="alert">${escape(message)}</div>` : ""}<form id="manual-form"><label>Destination<select name="destinationId" required><option value="">Select an active destination</option>${active(
-    ws.destinations,
-  )
-    .filter((d) => d.active !== false || d.id === prepare!.destinationId)
+  return `<dialog open id="manual-dialog" aria-labelledby="manual-title"><div class="section-row"><div><span class="section-label">THE HUMAN LAST MILE</span><h2 id="manual-title">Prepare a cross-post</h2></div>${button("Close", "close-prepare", 'aria-label="Close manual cross-post"', "subtle")}</div><p class="hint">1. Review → 2. Copy → 3. Open destination → 4. Publish manually → 5. Return and mark complete.</p>${message ? `<div class="notice" role="alert">${escape(message)}</div>` : ""}${taskSourcePost ? mediaPreview(taskSourcePost) : prepare.sourcePostId ? '<p class="hint">Source media will load when Buffer is connected.</p>' : ""}<form id="manual-form"><label>Destination<select name="destinationId" required><option value="">Select an active destination</option>${ws.destinations
+    .filter(
+      (d) =>
+        (!d.archived && d.active !== false) || d.id === prepare!.destinationId,
+    )
     .map(
       (d) =>
         `<option value="${escape(d.id)}" ${d.id === prepare!.destinationId ? "selected" : ""}>${escape(d.name)} · ${escape(d.platform)}</option>`,
@@ -503,20 +544,22 @@ function preparePanel() {
     )}</select></label>${!active(ws.destinations).length ? `<p>Add a destination in Settings first.</p>${button("Open Settings", "destinations", "", "subtle")}` : ""}${dest ? `<div class="notice"><strong>${escape(dest.format || "Destination guidance")}</strong><p>${escape(dest.instructions || "Review this destination’s current posting rules before publishing.")}</p><small>${escape(dest.notes)}</small></div>` : ""}<label>Destination-specific copy<textarea name="text" rows="7" required maxlength="10000">${escape(prepare.text)}</textarea></label><small id="manual-count">${prepare.text?.length || 0} characters</small>${field("Published URL (optional)", "resultUrl", prepare.resultUrl, 'maxlength="2048"', "url")}<label>Completion notes<textarea name="notes" rows="2" maxlength="2000">${escape(prepare.notes)}</textarea></label><div class="actions">${button("Copy caption", "copy-task", "", "subtle")}${link(dest?.url || prepare.destinationUrl, "Open destination")}<button class="primary" ${busy || !user ? "disabled" : ""}>Save manual task</button></div>${prepare.id ? `<div class="completion"><label class="check"><input type="checkbox" name="confirmed" id="manual-confirm"> I published this myself and want to record completion.</label>${button(prepare.state === "complete" ? "Reopen task" : "Mark complete", "complete-task", busy ? "disabled" : "", "subtle")}<p class="hint">Completion is your report, not confirmation from the social platform.</p></div>` : '<p class="hint">Save this task before recording completion.</p>'}</form></dialog><div class="modal-backdrop"></div>`;
 }
 function insightsPanel() {
- const pending = active(ws.tasks).filter(t => t.state !== "complete").length;
- const completed = active(ws.tasks).filter(t => t.state === "complete").length;
- const next = nextCampaignPost();
- return `<aside class="insights" aria-label="Mission intelligence"><span class="section-label">✦ LIVE INTELLIGENCE</span><h2>Signal check<span class="cyan">.</span></h2><div class="health"><span class="dot ${linked&&!reconnect?"healthy":"danger"}"></span><strong>${linked&&!reconnect?"Buffer linked":reconnect?"Reconnect needed":"Buffer offline"}</strong><small>${lastSync?"Last sync "+escape(date(lastSync)):"No verified sync yet"}</small></div><div class="metric-grid"><div><strong>${channels.length}</strong><span>Channels loaded</span></div><div><strong>${queue.length}</strong><span>Queue loaded</span></div><div><strong>${pending}</strong><span>Manual pending</span></div><div><strong>${completed}</strong><span>User-completed</span></div></div><div class="panel inset"><h3>Next signal</h3>${next?`<p>${escape(next.text.slice(0,125))}</p>${button("Prepare next ↗","next-buffer","","primary")}`:`<p>${linked?"Refresh your queue to find the next post.":"Connect Buffer to activate your publishing radar."}</p>`}</div><div class="footnote"><span class="dot"></span><p>Real Buffer data only. Manual completions are user-reported.</p></div></aside>`;
+  const pending = active(ws.tasks).filter((t) => t.state !== "complete").length;
+  const completed = active(ws.tasks).filter(
+    (t) => t.state === "complete",
+  ).length;
+  const next = nextCampaignPost();
+  return `<aside class="insights" aria-label="Mission intelligence"><span class="section-label">✦ LIVE INTELLIGENCE</span><h2>Signal check<span class="cyan">.</span></h2><div class="health"><span class="dot ${linked && !reconnect ? "healthy" : "danger"}"></span><strong>${linked && !reconnect ? "Buffer linked" : reconnect ? "Reconnect needed" : "Buffer offline"}</strong><small>${lastSync ? "Last sync " + escape(date(lastSync)) : "No verified sync yet"}</small></div><div class="metric-grid"><div><strong>${channels.length}</strong><span>Channels loaded</span></div><div><strong>${queue.length}</strong><span>Queue loaded</span></div><div><strong>${pending}</strong><span>Manual pending</span></div><div><strong>${completed}</strong><span>User-completed</span></div></div><div class="panel inset"><h3>Next signal</h3>${next ? `<p>${escape(next.text.slice(0, 125))}</p>${button("Prepare next ↗", "next-buffer", "", "primary")}` : `<p>${linked ? "Refresh your queue to find the next post." : "Connect Buffer to activate your publishing radar."}</p>`}</div><div class="footnote"><span class="dot"></span><p>Real Buffer data only. Manual completions are user-reported.</p></div></aside>`;
 }
 function dock() {
- return `<div class="smart-dock" role="toolbar" aria-label="Quick actions">${button("⌂ Home","today")}${button("✕ Next post","next-buffer",!linked||!queue.length?"disabled":"", "dock-primary")}${button("＋ Draft","new")}${button("↻ Sync","sync",!linked||busy?"disabled":"")}${button("? Guide","coach-open")}</div>`;
+  return `<div class="smart-dock" role="toolbar" aria-label="Quick actions">${button("⌂ Home", "today")}${button("✕ Next post", "next-buffer", !linked || !queue.length ? "disabled" : "", "dock-primary")}${button("＋ Draft", "new")}${button("↻ Sync", "sync", !linked || busy ? "disabled" : "")}${button("? Guide", "coach-open")}</div>`;
 }
 function render() {
   if (booting) return;
   const focus = document.activeElement as HTMLInputElement | null;
   const focusId = focus?.id;
   const selection = focus?.selectionStart;
-  app.innerHTML = `<header class="topbar"><a href="#today" class="wordmark"><span class="brand-ghost">${ghost}</span><span>Ghost<span class="pink">Post</span><small>by planet.X <b>✕</b> <i>v0.3.1 · alpha</i></small></span></a><nav aria-label="Workspace">${navigation()}</nav><div class="account">${badge(linked ? "Buffer connected" : configured ? "Buffer not connected" : "Buffer setup needed", linked ? "good" : "")}${button(user ? user.name?.split(" ")[0] || "Account" : "Sign in", user ? "account" : "signin", busy ? "disabled" : "", "subtle")}</div></header>${!user ? `<div class="signin-banner"><span><strong>Your publishing flow starts here.</strong> Sign in for private drafts, destinations and Buffer activity.</span>${button("Sign in to GhostPost", "signin", busy ? "disabled" : "", "primary")}</div>` : ""}${message ? `<div class="alert" role="alert"><span>${escape(message)}</span>${button("Dismiss", "dismiss", "", "text-button")}</div>` : ""}${!navigator.onLine ? '<div class="alert">You’re offline. Keep this page open to preserve unsaved text. Saving and Buffer sync need a connection.</div>' : ""}<div class="workspace">${timeline()}<main id="main" tabindex="-1">${{ today: todayView, queue: queueView, composer: composerView, history: historyView, settings: settingsView }[view]()}</main>${insightsPanel()}</div>${dock()}${preparePanel()}${batchPanel()}${coachPanel()}`;
+  app.innerHTML = `<header class="topbar"><a href="#today" class="wordmark"><span class="brand-ghost">${ghost}</span><span>Ghost<span class="pink">Post</span><small>by planet.X <b>✕</b> <i>v0.4.0 · alpha</i></small></span></a><nav aria-label="Workspace">${navigation()}</nav><div class="account">${badge(linked ? "Buffer connected" : configured ? "Buffer not connected" : "Buffer setup needed", linked ? "good" : "")}${button(user ? user.name?.split(" ")[0] || "Account" : "Sign in", user ? "account" : "signin", busy ? "disabled" : "", "subtle")}</div></header>${!user ? `<div class="signin-banner"><span><strong>Your publishing flow starts here.</strong> Sign in for private drafts, destinations and Buffer activity.</span>${button("Sign in to GhostPost", "signin", busy ? "disabled" : "", "primary")}</div>` : ""}${message ? `<div class="alert" role="alert"><span>${escape(message)}</span>${button("Dismiss", "dismiss", "", "text-button")}</div>` : ""}${!navigator.onLine ? '<div class="alert">You’re offline. Keep this page open to preserve unsaved text. Saving and Buffer sync need a connection.</div>' : ""}<div class="workspace">${timeline()}<main id="main" tabindex="-1">${{ today: todayView, queue: queueView, composer: composerView, history: historyView, settings: settingsView }[view]()}</main>${insightsPanel()}</div>${dock()}${preparePanel()}${batchPanel()}${coachPanel()}`;
   if (
     focusId &&
     [
@@ -537,7 +580,9 @@ function render() {
     )
       target.setSelectionRange(selection, selection);
   }
-  const dialog = document.querySelector<HTMLDialogElement>("#manual-dialog") || document.querySelector<HTMLDialogElement>("#batch-dialog");
+  const dialog =
+    document.querySelector<HTMLDialogElement>("#manual-dialog") ||
+    document.querySelector<HTMLDialogElement>("#batch-dialog");
   if (dialog && !dialog.matches(":modal")) {
     dialog.close();
     dialog.showModal();
@@ -623,6 +668,11 @@ async function verifyAccount() {
   const current = await auth.getUser();
   if (current?.userId !== user?.userId) {
     ws = emptyWorkspace();
+    batchPost = null;
+    taskSourcePost = null;
+    batchText = {};
+    mediaSelected.clear();
+    selectedCampaignVersion.clear();
     channels = [];
     queue = [];
     history = [];
@@ -659,10 +709,14 @@ async function copy(value = "") {
 }
 function openPrepare(item: Item, ref: string) {
   message = "";
+  if (taskSourcePost?.id !== item.sourcePostId) taskSourcePost = null;
   prepare = {
     id: "",
     text: item.text || "",
     contentRef: ref,
+    sourcePostId: item.sourcePostId,
+    sourceChannelId: item.sourceChannelId,
+    sourceAssetKeys: item.sourceAssetKeys,
     notes: "",
     resultUrl: "",
     destinationId: "",
@@ -696,7 +750,10 @@ app.addEventListener("input", (event) => {
       ...destinationEditor,
       [target.name]: target.type === "checkbox" ? target.checked : target.value,
     };
-  if (target.dataset.batchCopy) batchText[target.dataset.batchCopy]=target.value;
+  if (target.dataset.batchCopy) {
+    batchText[target.dataset.batchCopy] = target.value;
+    batchDirty = true;
+  }
   if (form === "manual-form" && prepare && target.name !== "confirmed") {
     prepare = { ...prepare, [target.name]: target.value };
     const count = document.getElementById("manual-count");
@@ -708,8 +765,31 @@ app.addEventListener("input", (event) => {
   }
 });
 app.addEventListener("change", (event) => {
+  const mediaTarget = event.target as HTMLInputElement;
+  if (mediaTarget.dataset.mediaPost && mediaTarget.dataset.mediaKey) {
+    const source = [...queue, ...history, batchPost, taskSourcePost].find(
+      (p) => p?.id === mediaTarget.dataset.mediaPost,
+    );
+    if (source) {
+      const selected =
+        mediaSelected.get(source.id) ||
+        new Set(source.assets?.map((a) => a.key));
+      mediaTarget.checked
+        ? selected.add(mediaTarget.dataset.mediaKey)
+        : selected.delete(mediaTarget.dataset.mediaKey);
+      mediaSelected.set(source.id, selected);
+      if (batchPost?.id === source.id) batchDirty = true;
+      if (prepare?.sourcePostId === source.id)
+        prepare.sourceAssetKeys = [...selected];
+    }
+    return;
+  }
+
   const target = event.target as HTMLInputElement;
-  if (target.dataset.batchSelect) batchSelected=target.checked?[...new Set([...batchSelected,target.dataset.batchSelect])]:batchSelected.filter(x=>x!==target.dataset.batchSelect);
+  if (target.dataset.batchSelect)
+    batchSelected = target.checked
+      ? [...new Set([...batchSelected, target.dataset.batchSelect])]
+      : batchSelected.filter((x) => x !== target.dataset.batchSelect);
   if (target.id === "channel-filter") {
     channelFilter = target.value;
     render();
@@ -736,6 +816,8 @@ app.addEventListener("change", (event) => {
       historyCursor = "";
       queueLoaded = false;
       historyLoaded = false;
+      selectedCampaignVersion.clear();
+      mediaSelected.clear();
       await refreshBuffer();
     });
 });
@@ -767,6 +849,50 @@ app.addEventListener("submit", (event) => {
     }
   });
 });
+app.addEventListener(
+  "cancel",
+  (event) => {
+    const dialog = event.target as HTMLDialogElement;
+    if (dialog.id === "batch-dialog") {
+      event.preventDefault();
+      if (!batchDirty || confirm("Discard your unsaved destination edits?")) {
+        batchPost = null;
+        batchDirty = false;
+        render();
+      }
+    }
+    if (dialog.id === "manual-dialog") {
+      event.preventDefault();
+      if (
+        confirm("Close this task editor? Unsaved changes will be discarded.")
+      ) {
+        prepare = null;
+        taskSourcePost = null;
+        render();
+      }
+    }
+  },
+  true,
+);
+app.addEventListener(
+  "error",
+  (event) => {
+    const target = event.target as HTMLElement;
+    if (target.matches("[data-media-preview],.media-attachment video")) {
+      target.setAttribute(
+        "aria-label",
+        "Preview unavailable. Try Refresh source media or Open source.",
+      );
+      const parent = target.closest(".media-attachment");
+      if (parent && !parent.querySelector(".media-error"))
+        parent.insertAdjacentHTML(
+          "beforeend",
+          '<small class="media-error">Preview unavailable. Refresh source media or open its source.</small>',
+        );
+    }
+  },
+  true,
+);
 app.addEventListener("click", (event) => {
   const target = (event.target as Element).closest<HTMLElement>(
     "[data-action]",
@@ -779,53 +905,217 @@ app.addEventListener("click", (event) => {
   const id = target.dataset.id;
   const kind = target.dataset.kind as "drafts" | "destinations" | "tasks";
   const post = [...queue, ...history].find((item) => item.id === id);
-  if (action === "coach-dismiss") { localStorage.setItem(coachKey(),"seen"); coachVisible=false; render(); return; }
-  if (action === "coach-open") { showCoach(true); render(); return; }
-  if (action === "next-buffer") { const next = nextCampaignPost(); if(next)startBatch(next); else toast("Refresh your Buffer queue first."); return; }
-  if (action === "campaign-select" || action === "campaign-next" || action === "campaign-prev") {
-    const group=campaignGroups([...queue,...history]).find(g=>g.length>1&&g[0].id===id);
-    if(!group||!id)return;
-    if(action==="campaign-select") {
-      const version=target.dataset.version;
-      if(group.some(p=>p.id===version))selectedCampaignVersion.set(id,version!);
-    } else {
-      const current=group.findIndex(p=>p.id===selectedCampaignVersion.get(id));
-      const position=current<0?0:current;
-      selectedCampaignVersion.set(id,group[(position+(action==="campaign-next"?1:-1)+group.length)%group.length].id);
+  if (action === "coach-dismiss") {
+    try {
+      localStorage.setItem(coachKey(), "seen");
+    } catch {
+      /* Optional guide preference. */
     }
+    coachVisible = false;
     render();
     return;
   }
-  if (action === "batch-post" && post) { startBatch(post); return; }
-  if (action === "batch-close") { batchPost=null; render(); return; }
-  if (action === "batch-settings") { batchPost=null; navigate("settings"); return; }
-  if (action === "batch-copy") { void copy(batchText[id||""]); return; }
+  if (action === "coach-open") {
+    showCoach(true);
+    render();
+    return;
+  }
+  if (action === "next-buffer") {
+    const next = nextCampaignPost();
+    if (next) startBatch(next);
+    else toast("Refresh your Buffer queue first.");
+    return;
+  }
+  if (
+    action === "campaign-select" ||
+    action === "campaign-next" ||
+    action === "campaign-prev"
+  ) {
+    const group = visibleGroups().find(
+      (g) => g.length > 1 && groupKey(g) === id,
+    );
+    if (!group || !id) return;
+    if (action === "campaign-select") {
+      const version = target.dataset.version;
+      if (group.some((p) => p.id === version))
+        selectedCampaignVersion.set(id, version!);
+    } else {
+      const current = group.findIndex(
+        (p) => p.id === selectedCampaignVersion.get(id),
+      );
+      const position = current < 0 ? 0 : current;
+      selectedCampaignVersion.set(
+        id,
+        group[
+          (position + (action === "campaign-next" ? 1 : -1) + group.length) %
+            group.length
+        ].id,
+      );
+    }
+    render();
+    document
+      .querySelector<HTMLElement>(
+        `[data-action="campaign-select"][data-id="${CSS.escape(id)}"][data-version="${CSS.escape(selectedCampaignVersion.get(id) || group[0].id)}"]`,
+      )
+      ?.focus();
+    return;
+  }
+  if (
+    action === "download-asset" ||
+    action === "download-selected" ||
+    action === "download-campaign"
+  ) {
+    void run(async () => {
+      const sources =
+        action === "download-campaign"
+          ? visibleGroups().find((g) => groupKey(g) === id) || []
+          : post
+            ? [post]
+            : batchPost?.id === id
+              ? [batchPost]
+              : taskSourcePost?.id === id
+                ? [taskSourcePost]
+                : [];
+      const items = sources
+        .filter((source): source is Post => Boolean(source))
+        .flatMap((source) =>
+          (source.assets || [])
+            .filter((asset) =>
+              action === "download-asset"
+                ? asset.key === target.dataset.key
+                : action === "download-campaign" ||
+                  (
+                    mediaSelected.get(source.id) ||
+                    new Set(source.assets?.map((a) => a.key))
+                  ).has(asset.key),
+            )
+            .map((asset) => ({ post: source, asset })),
+        );
+      await downloadAssets(items, action !== "download-asset");
+      toast("Download prepared. Attach the files yourself before publishing.");
+    });
+    return;
+  }
+  if (action === "refresh-source") {
+    void run(async () => {
+      if (!id) return;
+      const updated = (await api.post("/api/buffer/post", { postId: id })).data
+        .post as Post;
+      queue = queue.map((p) => (p.id === id ? updated : p));
+      history = history.map((p) => (p.id === id ? updated : p));
+      if (batchPost?.id === id) batchPost = updated;
+      if (taskSourcePost?.id === id) taskSourcePost = updated;
+      mediaSelected.delete(id);
+      toast("Source media refreshed. Your edited caption is preserved.");
+    });
+    return;
+  }
+  if (action === "batch-post" && post) {
+    startBatch(post);
+    return;
+  }
+  if (action === "batch-close") {
+    if (batchDirty && !confirm("Discard your unsaved destination edits?"))
+      return;
+    batchPost = null;
+    batchDirty = false;
+    render();
+    return;
+  }
+  if (action === "batch-settings") {
+    batchPost = null;
+    navigate("settings");
+    return;
+  }
+  if (action === "batch-copy") {
+    void copy(batchText[id || ""]);
+    return;
+  }
   if (action === "batch-share") {
-    const d=ws.destinations.find(x=>x.id===id);
-    if(!d)return;
-    if(navigator.share) {
-      void navigator.share({text:batchText[d.id]||""}).catch(err=>{if(err?.name!=="AbortError")toast("System Share unavailable. Use Copy caption.");});
-    } else toast("System Share isn't available in this browser. Use Copy caption.");
+    const d = ws.destinations.find((x) => x.id === id);
+    if (!d) return;
+    if (navigator.share) {
+      void navigator.share({ text: batchText[d.id] || "" }).catch((err) => {
+        if (err?.name !== "AbortError")
+          toast("System Share unavailable. Use Copy caption.");
+      });
+    } else
+      toast("System Share isn't available in this browser. Use Copy caption.");
     return;
   }
   if (action === "batch-open" || action === "batch-open-all") {
-    const dest=active(ws.destinations).filter(d=>d.active!==false&&url(d.url)&&(action==="batch-open-all"?batchSelected.includes(d.id):d.id===id));
-    if(!dest.length){toast("Select an active destination.");return;}
-    const outcomes=dest.map(d=>shareLaunch(d,batchText[d.id]||""));
-    for(const launch of outcomes)window.open(launch.url,"_blank","noopener,noreferrer");
-    toast(outcomes.every(x=>x.prefilled)?"Opened prefilled composers. Review before posting.":"Opened supported composers and posting pages. Unsupported destinations need manual paste.");
+    const dest = active(ws.destinations).filter(
+      (d) =>
+        d.active !== false &&
+        url(d.url) &&
+        (action === "batch-open-all"
+          ? batchSelected.includes(d.id)
+          : d.id === id),
+    );
+    if (!dest.length) {
+      toast("Select an active destination.");
+      return;
+    }
+    const outcomes = dest.map((d) => shareLaunch(d, batchText[d.id] || ""));
+    for (const launch of outcomes)
+      window.open(launch.url, "_blank", "noopener,noreferrer");
+    toast(
+      "Requested " +
+        outcomes.length +
+        " destination page(s). If extra tabs are blocked, open each destination individually. Review before posting.",
+    );
     return;
   }
   if (action === "batch-save") {
-    const source=batchPost;
-    if(!source)return;
-    const dest=active(ws.destinations).filter(d=>batchSelected.includes(d.id)&&d.active!==false&&url(d.url));
-    if(!dest.length){toast("Select at least one destination.");return;}
-    if(!confirm("Save "+dest.length+" manual posting tasks? Nothing will be published automatically."))return;
-    void run(async()=>{
-      for(const d of dest) await save("tasks",{id:"",text:batchText[d.id]||source.text,contentRef:"buffer:"+source.id,destinationId:d.id,destinationName:d.name,destinationUrl:d.url,state:"pending",notes:"Prepared from Buffer. Publish manually."});
-      batchPost=null;
-      toast("Saved "+dest.length+" manual tasks. Nothing was published.");
+    const source = batchPost;
+    if (!source) return;
+    const dest = active(ws.destinations).filter(
+      (d) => batchSelected.includes(d.id) && d.active !== false && url(d.url),
+    );
+    if (!dest.length) {
+      toast("Select at least one destination.");
+      return;
+    }
+    if (
+      !confirm(
+        "Save " +
+          dest.length +
+          " manual posting tasks? Nothing will be published automatically.",
+      )
+    )
+      return;
+    void run(async () => {
+      if (dest.some((d) => !batchText[d.id]?.trim()))
+        throw new Error(
+          "Every selected destination needs a caption. Review the empty version before saving.",
+        );
+      for (const d of dest)
+        await save("tasks", {
+          id:
+            ws.tasks.find(
+              (t) =>
+                t.contentRef === "buffer:" + source.id &&
+                t.destinationId === d.id &&
+                t.state !== "complete" &&
+                !t.archived,
+            )?.id || "",
+          sourcePostId: source.id,
+          sourceChannelId: source.channelId,
+          sourceAssetKeys: [
+            ...(mediaSelected.get(source.id) ||
+              new Set(source.assets?.map((a) => a.key))),
+          ],
+          text: batchText[d.id],
+          contentRef: "buffer:" + source.id,
+          destinationId: d.id,
+          destinationName: d.name,
+          destinationUrl: d.url,
+          state: "pending",
+          notes: "Prepared from Buffer. Publish manually.",
+        });
+      batchPost = null;
+      batchDirty = false;
+      toast("Saved " + dest.length + " manual tasks. Nothing was published.");
     });
     return;
   }
@@ -889,7 +1179,20 @@ app.addEventListener("click", (event) => {
     return;
   }
   if (action === "prepare-post" && post) {
-    openPrepare({ id: "", text: post.text }, "buffer:" + post.id);
+    taskSourcePost = post;
+    openPrepare(
+      {
+        id: "",
+        text: post.text,
+        sourcePostId: post.id,
+        sourceChannelId: post.channelId,
+        sourceAssetKeys: [
+          ...(mediaSelected.get(post.id) ||
+            new Set(post.assets?.map((a) => a.key))),
+        ],
+      },
+      "buffer:" + post.id,
+    );
     return;
   }
   if (action === "prepare-draft") {
@@ -898,7 +1201,19 @@ app.addEventListener("click", (event) => {
   }
   if (action === "open-task") {
     prepare = { ...ws.tasks.find((t) => t.id === id)! };
+    taskSourcePost = null;
     render();
+    if (prepare.sourcePostId)
+      void run(async () => {
+        taskSourcePost = (
+          await api.post("/api/buffer/post", { postId: prepare!.sourcePostId })
+        ).data.post;
+        if (taskSourcePost && prepare?.sourceAssetKeys)
+          mediaSelected.set(
+            taskSourcePost.id,
+            new Set(prepare.sourceAssetKeys),
+          );
+      });
     return;
   }
   if (action === "close-prepare") {
@@ -906,6 +1221,7 @@ app.addEventListener("click", (event) => {
       confirm("Close this task editor? Unsaved task changes will be discarded.")
     ) {
       prepare = null;
+      taskSourcePost = null;
       render();
     }
     return;
@@ -965,6 +1281,14 @@ app.addEventListener("click", (event) => {
     ) {
       await api.post("/api/buffer/disconnect", {});
       linked = false;
+      batchPost = null;
+      taskSourcePost = null;
+      batchText = {};
+      prepare = null;
+      batchSelected = [];
+      batchDirty = false;
+      mediaSelected.clear();
+      selectedCampaignVersion.clear();
       reconnect = false;
       connectedAt = null;
       channels = [];
@@ -978,6 +1302,8 @@ app.addEventListener("click", (event) => {
       organizationId = "";
       queueLoaded = false;
       historyLoaded = false;
+      selectedCampaignVersion.clear();
+      mediaSelected.clear();
       toast("Buffer disconnected. Stored credentials removed.");
     }
     if (action === "signout") {
@@ -985,6 +1311,14 @@ app.addEventListener("click", (event) => {
         return;
       await auth.signOut();
       user = null;
+      batchPost = null;
+      taskSourcePost = null;
+      batchText = {};
+      prepare = null;
+      batchSelected = [];
+      batchDirty = false;
+      mediaSelected.clear();
+      selectedCampaignVersion.clear();
       ws = emptyWorkspace();
       channels = [];
       queue = [];
@@ -1127,7 +1461,7 @@ app.addEventListener("click", (event) => {
           JSON.stringify(
             {
               application: "GhostPost",
-              version: "0.3.1",
+              version: "0.4.0",
               exportedAt: new Date().toISOString(),
               workspace: ws,
             },
@@ -1140,7 +1474,7 @@ app.addEventListener("click", (event) => {
       const href = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = href;
-      a.download = "GhostPost-11.14-v0.3.1-workspace.json";
+      a.download = "GhostPost-11.14-v0.4.0-workspace.json";
       a.click();
       URL.revokeObjectURL(href);
       toast("Workspace export created without credentials.");

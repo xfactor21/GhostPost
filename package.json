@@ -1,6 +1,6 @@
 {
   "name": "ghostpost",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -11,22 +11,29 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --loader ./tests/loader.mjs --test tests/backend.test.mjs tests/store.test.ts"
+    "test": "node --import tsx --loader ./tests/loader.mjs --test tests/backend.test.mjs tests/store.test.ts && npm run test:oauth && npm run test:domain && npm run test:media && npm run test:ui",
+    "test:oauth": "node --import tsx --loader ./tests/sql-loader.mjs --test tests/oauth-integration.test.mjs",
+    "test:domain": "node --import tsx --test tests/domain.test.ts tests/media.test.ts",
+    "test:media": "node --import tsx --loader ./tests/media-loader.mjs --test tests/media-routes.test.mjs",
+    "test:ui": "node --import tsx --loader ./tests/ui-loader.mjs --test tests/ui.test.mjs"
   },
   "dependencies": {
     "@neon/auth": "0.8.2",
     "@vercel/functions": "latest",
+    "fflate": "0.8.3",
     "next": "^16.1.0",
     "pg": "^8.16.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.16",
     "@types/node": "^24.0.0",
     "@types/pg": "^8.15.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "autoprefixer": "^10.4.0",
+    "linkedom": "0.18.15",
     "postcss": "^8.4.0",
     "tailwindcss": "^3.4.0",
     "tsx": "^4.20.0",
