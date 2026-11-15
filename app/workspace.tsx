@@ -2,7 +2,14 @@
 import { useEffect } from "react";
 export default function Workspace() {
   useEffect(() => {
-    void import("../src/main");
+    void import("../src/main").catch(() => {
+      const host = document.getElementById("app");
+      if (host) {
+        host.textContent =
+          "GhostPost could not load. Reload this page to try again.";
+        host.setAttribute("role", "alert");
+      }
+    });
   }, []);
   return (
     <>

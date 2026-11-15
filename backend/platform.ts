@@ -1,9 +1,17 @@
+import {
+  PublicError,
+  requestScope,
+  stage,
+  endpoint,
+  failure,
+  requestId,
+} from "./diagnostics";
 import { auth } from "../lib/auth";
 export { db } from "./store";
 export type RouterResponse = {
   statusCode: number;
   headers: Record<string, string>;
-  body: string;
+  body: BodyInit | null;
 };
 export type RouterContext = {
   body: unknown;
@@ -23,108 +31,171 @@ export const json = (body: unknown, statusCode = 200): RouterResponse => ({
 export const secrets = {
   async readSecret(name: string) {
     const value = process.env[name];
-    if (!value) throw new Error("Required server configuration is missing.");
+    if (!value)
+      throw new PublicError(
+        "Required server configuration is missing. Contact the deployment owner.",
+        503,
+        "SERVER_CONFIGURATION",
+      );
     return value;
   },
   async listSecretNames() {
     return Object.keys(process.env).filter((k) => Boolean(process.env[k]));
   },
 };
-export function isAppDatabaseError(
-  _error: unknown,
-): _error is { code: string } {
-  return false;
+export function errorResponse(error: unknown) {
+  const result = failure(error);
+  return {
+    ...json(
+      { error: result.message, code: result.code, requestId: result.requestId },
+      result.status,
+    ),
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      "X-Request-ID": result.requestId,
+      ...(result.status === 429 ? { "Retry-After": "5" } : {}),
+    },
+  };
 }
 export function requireAuth(): RouterMiddleware {
   return async (ctx) => {
-    const { data } = await auth.getSession();
-    if (!data?.user)
-      return json({ error: "Sign in to GhostPost to continue." }, 401);
-    ctx.user = { userId: data.user.id };
+    stage("authentication.session");
+    let result;
+    try {
+      result = await auth.getSession();
+    } catch {
+      throw new PublicError(
+        "Your sign-in could not be verified. Please retry shortly.",
+        503,
+        "AUTH_UNAVAILABLE",
+      );
+    }
+    if (result.error)
+      throw new PublicError(
+        "The sign-in service is temporarily unavailable. Please retry.",
+        503,
+        "AUTH_UNAVAILABLE",
+      );
+    if (!result.data?.user)
+      throw new PublicError(
+        "Your GhostPost session has expired. Sign in and try again.",
+        401,
+        "AUTH_REQUIRED",
+      );
+    ctx.user = { userId: result.data.user.id };
   };
 }
 export function router(routes: Record<string, RouterMiddleware[]>) {
-  return async (request: Request) => {
-    const url = new URL(request.url),
-      headers = Object.fromEntries(request.headers.entries());
-    let result: RouterResponse | undefined;
-    try {
-      if (!["GET", "HEAD"].includes(request.method)) {
-        const origin = request.headers.get("origin");
-        const allowed = new Set([
-          process.env.APP_ORIGIN,
-          ...(process.env.APP_ADDITIONAL_ORIGINS || "")
-            .split(",")
-            .filter(Boolean),
-          ...(!process.env.VERCEL ? ["http://localhost:3000"] : []),
-        ]);
-        if (
-          !origin ||
-          !allowed.has(origin) ||
-          request.headers.get("sec-fetch-site") === "cross-site"
-        )
-          return Response.json(
-            { error: "Request origin was not accepted." },
-            { status: 403 },
-          );
-        if (
-          !request.headers.get("content-type")?.startsWith("application/json")
-        )
-          return Response.json({ error: "Expected JSON." }, { status: 415 });
+  const compiled = Object.entries(routes).map(([pattern, middlewares]) => {
+    const [method, path] = pattern.split(" "),
+      keys: string[] = [];
+    const parts = path.split("/").map((part) => {
+      if (part.startsWith(":")) {
+        const key = part.slice(1);
+        if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(key))
+          throw new Error("Invalid route parameter.");
+        keys.push(key);
+        return "([^/]+)";
       }
-      for (const [pattern, middlewares] of Object.entries(routes)) {
-        const [method, path] = pattern.split(" ");
-        if (method !== request.method) continue;
-        const keys: string[] = [];
-        const matcher = new RegExp(
-          "^" +
-            path.replace(/:([a-z]+)/g, (_all, key) => {
-              keys.push(key);
-              return "([^/]+)";
-            }) +
-            "$",
-        );
-        const match = url.pathname.match(matcher);
-        if (!match) continue;
-        const raw = ["GET", "HEAD"].includes(request.method)
-          ? ""
-          : await request.text();
-        if (Buffer.byteLength(raw) > 240000)
-          return Response.json(
-            { error: "Request is too large." },
-            { status: 413 },
-          );
-        const context: RouterContext = {
-          body: raw ? JSON.parse(raw) : undefined,
-          query: Object.fromEntries(url.searchParams.entries()),
-          params: Object.fromEntries(
-            keys.map((k, i) => [k, decodeURIComponent(match[i + 1])]),
-          ),
-          event: { headers },
-        };
-        for (const middleware of middlewares) {
-          const response = await middleware(context);
-          if (response) {
-            result = response;
-            break;
-          }
-        }
-        break;
-      }
-    } catch {
-      result = json(
-        { error: "The operation could not be completed. Please retry." },
-        503,
-      );
-    }
-    result ||= json({ error: "Not found." }, 404);
-    return new Response(result.body, {
-      status: result.statusCode,
-      headers: {
-        ...result.headers,
-        "Cache-Control": "no-store",
-        "X-Content-Type-Options": "nosniff",
-      },
+      return part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     });
+    return {
+      pattern,
+      method,
+      keys,
+      matcher: new RegExp("^" + parts.join("/") + "$"),
+      middlewares,
+    };
+  });
+  return async (request: Request) => {
+    const url = new URL(request.url);
+    const route = compiled.find(
+      (route) =>
+        route.method === request.method && route.matcher.test(url.pathname),
+    );
+    return requestScope(
+      route?.pattern || request.method + " /unmatched",
+      async () => {
+        let result: RouterResponse;
+        try {
+          if (!["GET", "HEAD"].includes(request.method)) {
+            const allowed = new Set([
+              process.env.APP_ORIGIN,
+              ...(process.env.APP_ADDITIONAL_ORIGINS || "")
+                .split(",")
+                .map((value) => value.trim())
+                .filter(Boolean),
+              ...(!process.env.VERCEL ? ["http://localhost:3000"] : []),
+            ]);
+            const origin = request.headers.get("origin");
+            if (
+              !origin ||
+              !allowed.has(origin) ||
+              request.headers.get("sec-fetch-site") === "cross-site"
+            )
+              throw new PublicError(
+                "This request did not come from an accepted GhostPost page. Reload GhostPost and try again.",
+                403,
+                "ORIGIN_REJECTED",
+              );
+            if (
+              !request.headers
+                .get("content-type")
+                ?.toLowerCase()
+                .startsWith("application/json")
+            )
+              throw new PublicError(
+                "Expected a JSON request.",
+                415,
+                "CONTENT_TYPE_REJECTED",
+              );
+          }
+          result = json({ error: "Not found." }, 404);
+          if (route) {
+            const match = url.pathname.match(route.matcher)!;
+            const raw = ["GET", "HEAD"].includes(request.method)
+              ? ""
+              : await request.text();
+            if (Buffer.byteLength(raw) > 240000)
+              throw new PublicError(
+                "The request is too large.",
+                413,
+                "BODY_TOO_LARGE",
+              );
+            const ctx: RouterContext = {
+              body: raw ? JSON.parse(raw) : undefined,
+              query: Object.fromEntries(url.searchParams),
+              params: Object.fromEntries(
+                route.keys.map((key, index) => [
+                  key,
+                  decodeURIComponent(match[index + 1]),
+                ]),
+              ),
+              event: { headers: Object.fromEntries(request.headers) },
+            };
+            for (const middleware of route.middlewares) {
+              const response = await middleware(ctx);
+              if (response) {
+                result = response;
+                break;
+              }
+            }
+          }
+        } catch (error) {
+          result = errorResponse(error);
+        }
+        return new Response(result.body, {
+          status: result.statusCode,
+          headers: {
+            ...result.headers,
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+            "X-Request-ID": requestId(),
+          },
+        });
+      },
+    );
   };
 }
