@@ -75,6 +75,39 @@ test("campaign keys and version IDs survive pagination, ordering, duplicates and
   assert.ok(after.some((p) => p.id === b.id));
   assert.equal(campaignKey(campaignGroups([b, c])[0]), campaignKey(after));
 });
+test("shared source identity groups staggered platform publications", () => {
+  const posts = [
+    post("facebook", "fb", 0, { contentItemId: "episode-1" }),
+    post("linkedin", "li", 1, { contentItemId: "episode-1" }),
+    post("pinterest", "pin", 2, { contentItemId: "episode-1" }),
+  ];
+  const group = campaignGroups(posts);
+  assert.equal(group.length, 1);
+  assert.equal(group[0].length, 3);
+  assert.equal(campaignKey(group[0]), "sent:content:episode-1");
+  assert.equal(campaignKey(campaignGroups(posts.slice(0, 2))[0]), campaignKey(group[0]));
+});
+test("shared idea identity groups across different minutes without a content ID", () => {
+  assert.equal(campaignGroups([
+    post("a", "fb", 0, { ideaId: "idea-1" }),
+    post("b", "li", 2, { ideaId: "idea-1" }),
+  ]).length, 1);
+});
+test("unrelated nearby posts and statuses never merge without source identity", () => {
+  assert.equal(campaignGroups([
+    post("a", "fb", 0, { contentItemId: "episode-1" }),
+    post("b", "li", 1, { contentItemId: "episode-2" }),
+    post("c", "pin", 2),
+    post("d", "x", 0, { status: "scheduled", dueAt: "2026-11-14T12:00:00Z", contentItemId: "episode-1" }),
+  ]).length, 4);
+});
+test("repeated channel versions are not silently combined across minutes", () => {
+  assert.equal(campaignGroups([
+    post("a", "fb", 0, { contentItemId: "episode-1" }),
+    post("b", "fb", 1, { contentItemId: "episode-1" }),
+    post("c", "li", 2, { contentItemId: "episode-1" }),
+  ]).length, 3);
+});
 test("media with null IDs keeps per-post associations and stable refreshed URL keys", () => {
   const a = normalizeAssets("post-one", [
     {
